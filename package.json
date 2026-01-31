@@ -73,7 +73,8 @@
     "publish": {
       "provider": "github",
       "owner": "20eroyal",
-      "repo": "worlds-end"
+      "repo": "worlds-end",
+      "releaseType": "release"
     }
   }
 }
