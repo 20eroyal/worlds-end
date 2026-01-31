@@ -381,10 +381,11 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     } else if (entity.type === EntityType.HOUSE) {
       // Draw house sprite when available, otherwise fallback to tile-aligned rectangle
       const tileSize = TILE_SIZE;
-      const w = Math.round(tileSize * 0.9);
-      const h = Math.round(tileSize * 0.9);
+      const w = Math.round(tileSize * 1.5);
+      const h = Math.round(tileSize * 1.5);
       const x = Math.round(pos.x - w / 2);
-      const y = Math.round(pos.y - h); // anchor bottom at pos.y (ground)
+      // Anchor bottom slightly below pos.y so the building sits on the ground
+      const y = Math.round(pos.y - h + Math.round(tileSize * 0.2));
 
       if (houseLoaded && houseSpriteRef.current) {
         const img = houseSpriteRef.current;
@@ -407,10 +408,10 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     } else if (entity.type === EntityType.MINE) {
       // Draw mine as a tile-aligned building with coin emblem
       const tileSize = TILE_SIZE;
-      const w = Math.round(tileSize * 0.9);
-      const h = Math.round(tileSize * 0.9);
+      const w = Math.round(tileSize * 1.5);
+      const h = Math.round(tileSize * 1.5);
       const x = Math.round(pos.x - w / 2);
-      const y = Math.round(pos.y - h); // anchor bottom at pos.y
+      const y = Math.round(pos.y - h + Math.round(tileSize * 0.2)); // anchor bottom slightly lower
 
       // Building body
       ctx.fillStyle = '#fbbf24'; // gold/amber
