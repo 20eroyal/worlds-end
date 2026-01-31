@@ -1,9 +1,15 @@
 import { app, BrowserWindow, dialog } from 'electron';
 import path from 'path';
-import { autoUpdater } from 'electron-updater';
+import { fileURLToPath } from 'url';
+import electronUpdater from 'electron-updater';
+import electronSquirrelStartup from 'electron-squirrel-startup';
+
+const { autoUpdater } = electronUpdater;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
-if (await import('electron-squirrel-startup')) {
+if (electronSquirrelStartup) {
   app.quit();
 }
 
