@@ -1,0 +1,5 @@
+{
+  "name": "World's End",
+  "description": "World's End - An isometric P2P RTS game where players defend bases against zombies, build houses to increase population, and destroy the enemy spawn.",
+  "requestFramePermissions": []
+}
