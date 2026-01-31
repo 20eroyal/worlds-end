@@ -3,7 +3,7 @@ import {
 } from '../types';
 import { 
   MAP_SIZE, UNIT_TYPES, ZOMBIE_BOUNTY, BUILD_RADIUS, 
-  PASSIVE_GOLD_AMOUNT, COLORS 
+  PASSIVE_GOLD_AMOUNT, COLORS, MINE_COST 
 } from '../constants';
 import { getDistance } from '../utils/isometric';
 
@@ -193,6 +193,36 @@ export class GameEngine {
         y: Math.floor(y) + 0.5,
         hp: 100,
         maxHp: 100,
+        radius: 0.5,
+        ownerId: playerId
+      });
+    }
+  }
+
+  buildMine(playerId: string, x: number, y: number) {
+    const player = this.state.players[playerId];
+    if (!player || player.defeated) return; // Can't build if defeated
+    
+    const dist = getDistance({x, y}, player.basePosition);
+    const occupied = this.state.entities.some(e => 
+      Math.abs(e.x - x) < 0.8 && Math.abs(e.y - y) < 0.8
+    );
+
+    if (
+      player.gold >= MINE_COST && 
+      dist <= BUILD_RADIUS && 
+      !occupied &&
+      this.isValidTerrain(x, y)
+    ) {
+      player.gold -= MINE_COST;
+      
+      this.state.entities.push({
+        id: generateId(),
+        type: EntityType.MINE,
+        x: Math.floor(x) + 0.5,
+        y: Math.floor(y) + 0.5,
+        hp: 150,
+        maxHp: 150,
         radius: 0.5,
         ownerId: playerId
       });

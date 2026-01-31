@@ -10,6 +10,8 @@ export const STARTING_GOLD = 100;
 export const STARTING_POP_CAP = 5;
 export const HOUSE_POP_INCREASE = 5;
 export const HOUSE_COST = 50;
+export const MINE_COST = 250;
+export const MINE_INCOME = 50; // Extra gold per income cycle
 
 // Units
 export const UNIT_TYPES = {

@@ -8,7 +8,8 @@ export enum EntityType {
   ZOMBIE,
   BASE,
   HOUSE,
-  ENEMY_BASE
+  ENEMY_BASE,
+  MINE
 }
 
 export interface Entity {

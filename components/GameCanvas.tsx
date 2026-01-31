@@ -1,12 +1,12 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { GameEngine } from '../services/GameEngine';
 import { cartToIso, isoToCart } from '../utils/isometric';
-import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT } from '../constants';
+import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME } from '../constants';
 import { EntityType, Entity, PlayerState } from '../types';
 
 // Zombie sprite configuration
 const ZOMBIE_SPRITE = {
-  src: '/assets/zombie.png',
+  src: './assets/zombie.png',
   frameWidth: 64,   // Width of each frame
   frameHeight: 64,  // Height of each frame
   walkFrames: 4,    // Number of walk animation frames
@@ -84,7 +84,14 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
     const interval = setInterval(() => {
       if (!engine.state.gameOver) {
         Object.values(engine.state.players).forEach((p: PlayerState) => {
-            p.gold += PASSIVE_GOLD_AMOUNT;
+            // Base passive income
+            let income = PASSIVE_GOLD_AMOUNT;
+            // Add income from mines
+            const mineCount = engine.state.entities.filter(
+              e => e.type === EntityType.MINE && e.ownerId === p.id
+            ).length;
+            income += mineCount * MINE_INCOME;
+            p.gold += income;
         });
       }
     }, GOLD_GENERATION_INTERVAL);
@@ -99,7 +106,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
             // Spawn zombies based on player count
             engine.spawnZombieWave();
         }
-    }, 2000);
+    }, 4000); // Spawn every 4 seconds (was 2 seconds)
     return () => clearInterval(interval);
   }, [engine, isHost]);
 
@@ -334,6 +341,31 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
         ctx.strokeStyle = 'black';
         ctx.lineWidth = 1;
         ctx.stroke();
+    } else if (entity.type === EntityType.MINE) {
+        // Draw mine as a gold/yellow building with pickaxe symbol
+        const size = TILE_SIZE * 0.7;
+        // Diamond shape base
+        ctx.fillStyle = '#fbbf24'; // Amber/gold color
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y - size);
+        ctx.lineTo(pos.x + size, pos.y - size/2);
+        ctx.lineTo(pos.x, pos.y);
+        ctx.lineTo(pos.x - size, pos.y - size/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#92400e'; // Dark amber border
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Gold coin symbol in center
+        ctx.fillStyle = '#fef08a'; // Light yellow
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y - size/2, size * 0.25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#92400e';
+        ctx.font = 'bold 10px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('$', pos.x, pos.y - size/2);
     } else if (entity.type === EntityType.ZOMBIE) {
         // Draw animated zombie
         drawZombie(ctx, pos, entity, time);
@@ -424,6 +456,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
         ctx.fillRect(ex - 1, ey - 1, 3, 3);
       } else if (entity.type === EntityType.HOUSE) {
         ctx.fillStyle = getPlayerColor(entity.ownerId);
+        ctx.fillRect(ex - 2, ey - 2, 4, 4);
+      } else if (entity.type === EntityType.MINE) {
+        ctx.fillStyle = '#fbbf24'; // Gold color for mines
         ctx.fillRect(ex - 2, ey - 2, 4, 4);
       }
     });

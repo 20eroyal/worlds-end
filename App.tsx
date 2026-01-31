@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import GameCanvas from './components/GameCanvas';
 import { GameEngine } from './services/GameEngine';
 import { networkManager } from './services/NetworkManager';
-import { UNIT_TYPES, HOUSE_COST, COLORS } from './constants';
+import { UNIT_TYPES, HOUSE_COST, COLORS, MINE_COST } from './constants';
 import { PlayerState, PeerMessage, LobbyPlayer } from './types';
 
 // Generate a simple room ID for sharing
@@ -23,6 +23,7 @@ const AVAILABLE_COLORS = [
 const App: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [buildMode, setBuildMode] = useState(false);
+  const [buildType, setBuildType] = useState<'house' | 'mine'>('house');
   const [roomId, setRoomId] = useState('');
   const [isHost, setIsHost] = useState(false);
   const [isMultiplayer, setIsMultiplayer] = useState(false);
@@ -152,6 +153,9 @@ const App: React.FC = () => {
         } else if (action.action === 'buildHouse' && engineRef.current) {
           console.log('Network: Host building house for', action.playerId);
           engineRef.current.buildHouse(action.playerId, action.x, action.y);
+        } else if (action.action === 'buildMine' && engineRef.current) {
+          console.log('Network: Host building mine for', action.playerId);
+          engineRef.current.buildMine(action.playerId, action.x, action.y);
         } else if (action.action === 'startGame' && action.playerCount) {
           // Guest receives start game signal from host with player count and their player ID
           console.log('Network: Game starting with', action.playerCount, 'players! Assigned player ID:', action.playerId);
@@ -218,6 +222,17 @@ const App: React.FC = () => {
 
     return () => clearInterval(interval);
   }, [isPlaying, engine, localPlayerId]);
+
+  // ESC key to cancel build mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && buildMode) {
+        setBuildMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [buildMode]);
 
 
   const handleStart = () => {
@@ -369,16 +384,30 @@ const App: React.FC = () => {
 
   const handleTileSelect = (x: number, y: number) => {
       if (buildMode) {
-          if (isMultiplayer && !isHost) {
-            // Guest sends action to host
-            networkManager.sendAction({
-              action: 'buildHouse',
-              playerId: localPlayerId,
-              x,
-              y
-            });
-          } else {
-            engine.buildHouse(localPlayerId, x, y);
+          if (buildType === 'house') {
+            if (isMultiplayer && !isHost) {
+              // Guest sends action to host
+              networkManager.sendAction({
+                action: 'buildHouse',
+                playerId: localPlayerId,
+                x,
+                y
+              });
+            } else {
+              engine.buildHouse(localPlayerId, x, y);
+            }
+          } else if (buildType === 'mine') {
+            if (isMultiplayer && !isHost) {
+              // Guest sends action to host
+              networkManager.sendAction({
+                action: 'buildMine',
+                playerId: localPlayerId,
+                x,
+                y
+              });
+            } else {
+              engine.buildMine(localPlayerId, x, y);
+            }
           }
           // Don't auto-close build mode, let them build multiple
       }
@@ -784,12 +813,12 @@ const App: React.FC = () => {
 
           <div className="w-px h-10 bg-gray-700 mx-2"></div>
 
-          {/* Build Button */}
+          {/* Build House Button */}
           <button 
-            onClick={handleToggleBuild}
+            onClick={() => { setBuildType('house'); setBuildMode(true); }}
             className={`
                 relative w-20 h-20 rounded-lg flex flex-col items-center justify-center border-2 transition-all
-                ${buildMode 
+                ${buildMode && buildType === 'house'
                     ? 'bg-amber-600/50 border-amber-500 text-white -translate-y-2 shadow-[0_0_15px_rgba(245,158,11,0.5)]' 
                     : 'bg-gray-800 border-gray-600 hover:bg-gray-700 text-gray-300'
                 }
@@ -799,12 +828,29 @@ const App: React.FC = () => {
             <div className="text-xs text-yellow-400">${HOUSE_COST}</div>
             <div className="text-[10px] text-gray-400 mt-1">+5 POP</div>
           </button>
+
+          {/* Build Mine Button */}
+          <button 
+            onClick={() => { setBuildType('mine'); setBuildMode(true); }}
+            className={`
+                relative w-20 h-20 rounded-lg flex flex-col items-center justify-center border-2 transition-all
+                ${buildMode && buildType === 'mine'
+                    ? 'bg-yellow-600/50 border-yellow-500 text-white -translate-y-2 shadow-[0_0_15px_rgba(234,179,8,0.5)]' 
+                    : 'bg-gray-800 border-gray-600 hover:bg-gray-700 text-gray-300'
+                }
+            `}
+            disabled={(uiState?.gold || 0) < MINE_COST}
+          >
+            <div className="text-xs font-bold mb-1">MINE</div>
+            <div className="text-xs text-yellow-400">${MINE_COST}</div>
+            <div className="text-[10px] text-gray-400 mt-1">+50 GOLD</div>
+          </button>
       </div>
 
       {/* Build Mode Instructions */}
       {buildMode && (
           <div className="absolute bottom-32 left-1/2 -translate-x-1/2 bg-black/70 px-4 py-2 rounded text-white text-sm pointer-events-none">
-              Click on the grid near your base to build.
+              Click on the grid near your base to build a {buildType}. Press ESC to cancel.
           </div>
       )}
     </div>
