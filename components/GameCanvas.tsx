@@ -1,12 +1,31 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { GameEngine } from '../services/GameEngine';
 import { cartToIso, isoToCart } from '../utils/isometric';
-import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME } from '../constants';
+import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME, BUILD_RADIUS } from '../constants';
 import { EntityType, Entity, PlayerState } from '../types';
+
+// Helper to get correct asset path for Electron or web
+function getZombieSpritePath() {
+  // @ts-ignore
+  if (window && window.__dirname) {
+    // Electron: use absolute path
+    return window.__dirname + '/assets/zombie.png';
+  }
+  // Web: use relative path
+  return './assets/zombie.png';
+}
+
+function getHouseSpritePath() {
+  // @ts-ignore
+  if (window && window.__dirname) {
+    return window.__dirname + '/assets/house.png';
+  }
+  return './assets/house.png';
+}
 
 // Zombie sprite configuration
 const ZOMBIE_SPRITE = {
-  src: './assets/zombie.png',
+  src: getZombieSpritePath(),
   frameWidth: 64,   // Width of each frame
   frameHeight: 64,  // Height of each frame
   walkFrames: 4,    // Number of walk animation frames
@@ -17,14 +36,17 @@ interface GameCanvasProps {
   engine: GameEngine;
   playerId: string;
   buildMode: boolean;
+  buildType?: 'house' | 'mine' | 'wall';
   onSelectTile: (x: number, y: number) => void;
   isHost: boolean;
 }
 
-const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, onSelectTile, isHost }) => {
+const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, buildType, onSelectTile, isHost }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const zombieSpriteRef = useRef<HTMLImageElement | null>(null);
+  const houseSpriteRef = useRef<HTMLImageElement | null>(null);
   const [spriteLoaded, setSpriteLoaded] = useState(false);
+  const [houseLoaded, setHouseLoaded] = useState(false);
   
   // Load zombie sprite
   useEffect(() => {
@@ -43,8 +65,18 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
     };
     img.src = ZOMBIE_SPRITE.src;
     
+    // Load house sprite
+    const houseImg = new Image();
+    houseImg.onload = () => {
+      houseSpriteRef.current = houseImg;
+      setHouseLoaded(true);
+      console.log('House sprite loaded');
+    };
+    houseImg.src = getHouseSpritePath();
+    
     return () => {
       zombieSpriteRef.current = null;
+      houseSpriteRef.current = null;
     };
   }, []);
   
@@ -138,11 +170,29 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
     // Draw walkable terrain
     ctx.fillStyle = COLORS.TERRAIN;
     
+    // Get player's base position for build range
+    const player = engine.state.players[playerId];
+    const basePos = player?.basePosition;
+    
     // Determine view bounds in cartesian to optimize (Optional, but simple loop is fine for 64x64)
     for (let x = 0; x < MAP_SIZE; x++) {
         for (let y = 0; y < MAP_SIZE; y++) {
             if (engine.isValidTerrain(x, y)) {
                 const pos = cartToIso(x, y);
+                
+                // Check if tile is within build range (for house/mine, not wall)
+                const inBuildRange = basePos && 
+                  Math.sqrt(Math.pow(x + 0.5 - basePos.x, 2) + Math.pow(y + 0.5 - basePos.y, 2)) <= BUILD_RADIUS;
+                
+                // Highlight build range when in build mode for house/mine
+                if (buildMode && buildType !== 'wall' && inBuildRange) {
+                  ctx.fillStyle = 'rgba(239, 68, 68, 0.4)'; // Light red highlight for buildable area
+                } else if (buildMode && buildType === 'wall') {
+                  ctx.fillStyle = COLORS.TERRAIN; // No dimming for walls - they can go anywhere
+                } else {
+                  ctx.fillStyle = COLORS.TERRAIN;
+                }
+                
                 ctx.beginPath();
                 ctx.moveTo(pos.x, pos.y);
                 ctx.lineTo(pos.x + TILE_SIZE, pos.y + TILE_SIZE / 2);
@@ -329,46 +379,81 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
         ctx.lineWidth = 4;
         ctx.stroke();
     } else if (entity.type === EntityType.HOUSE) {
+      // Draw house sprite when available, otherwise fallback to tile-aligned rectangle
+      const tileSize = TILE_SIZE;
+      const w = Math.round(tileSize * 0.9);
+      const h = Math.round(tileSize * 0.9);
+      const x = Math.round(pos.x - w / 2);
+      const y = Math.round(pos.y - h); // anchor bottom at pos.y (ground)
+
+      if (houseLoaded && houseSpriteRef.current) {
+        const img = houseSpriteRef.current;
+        // Draw image scaled to fit tile, anchored to ground
+        ctx.drawImage(img, x, y, w, h);
+      } else {
+        // Draw simple building rectangle
         ctx.fillStyle = getPlayerColor(entity.ownerId);
-        const size = TILE_SIZE * 0.7;
-        ctx.beginPath();
-        ctx.moveTo(pos.x, pos.y - size);
-        ctx.lineTo(pos.x + size, pos.y - size/2);
-        ctx.lineTo(pos.x, pos.y);
-        ctx.lineTo(pos.x - size, pos.y - size/2);
-        ctx.closePath();
-        ctx.fill();
+        ctx.fillRect(x, y, w, h);
+        // Roof line
         ctx.strokeStyle = 'black';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-    } else if (entity.type === EntityType.MINE) {
-        // Draw mine as a gold/yellow building with pickaxe symbol
-        const size = TILE_SIZE * 0.7;
-        // Diamond shape base
-        ctx.fillStyle = '#fbbf24'; // Amber/gold color
-        ctx.beginPath();
-        ctx.moveTo(pos.x, pos.y - size);
-        ctx.lineTo(pos.x + size, pos.y - size/2);
-        ctx.lineTo(pos.x, pos.y);
-        ctx.lineTo(pos.x - size, pos.y - size/2);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = '#92400e'; // Dark amber border
         ctx.lineWidth = 2;
-        ctx.stroke();
-        // Gold coin symbol in center
-        ctx.fillStyle = '#fef08a'; // Light yellow
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y - size/2, size * 0.25, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#92400e';
-        ctx.font = 'bold 10px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('$', pos.x, pos.y - size/2);
+        ctx.strokeRect(x, y, w, h);
+        // Small door
+        ctx.fillStyle = '#4b5563';
+        const doorW = Math.max(6, Math.round(w * 0.2));
+        const doorH = Math.max(8, Math.round(h * 0.35));
+        ctx.fillRect(pos.x - doorW/2, pos.y - doorH, doorW, doorH);
+      }
+    } else if (entity.type === EntityType.MINE) {
+      // Draw mine as a tile-aligned building with coin emblem
+      const tileSize = TILE_SIZE;
+      const w = Math.round(tileSize * 0.9);
+      const h = Math.round(tileSize * 0.9);
+      const x = Math.round(pos.x - w / 2);
+      const y = Math.round(pos.y - h); // anchor bottom at pos.y
+
+      // Building body
+      ctx.fillStyle = '#fbbf24'; // gold/amber
+      ctx.fillRect(x, y, w, h);
+      // Border
+      ctx.strokeStyle = '#92400e';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+      // Coin emblem centered on building front
+      ctx.fillStyle = '#fef08a';
+      const coinR = Math.round(Math.min(w, h) * 0.18);
+      ctx.beginPath();
+      ctx.arc(pos.x, y + Math.round(h*0.35), coinR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#92400e';
+      ctx.font = `bold ${Math.max(10, coinR)}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('$', pos.x, y + Math.round(h*0.35));
     } else if (entity.type === EntityType.ZOMBIE) {
         // Draw animated zombie
         drawZombie(ctx, pos, entity, time);
+    } else if (entity.type === EntityType.WALL) {
+        // Draw wall as a gray stone block
+        const size = TILE_SIZE * 0.5;
+        ctx.fillStyle = '#6b7280'; // Gray stone color
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y - size);
+        ctx.lineTo(pos.x + size, pos.y - size/2);
+        ctx.lineTo(pos.x, pos.y);
+        ctx.lineTo(pos.x - size, pos.y - size/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#374151'; // Dark gray border
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Add brick texture lines
+        ctx.strokeStyle = '#4b5563';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pos.x - size * 0.5, pos.y - size * 0.65);
+        ctx.lineTo(pos.x + size * 0.5, pos.y - size * 0.65);
+        ctx.stroke();
     } else {
         // Player units
         ctx.fillStyle = getPlayerColor(entity.ownerId);
@@ -460,6 +545,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, on
       } else if (entity.type === EntityType.MINE) {
         ctx.fillStyle = '#fbbf24'; // Gold color for mines
         ctx.fillRect(ex - 2, ey - 2, 4, 4);
+      } else if (entity.type === EntityType.WALL) {
+        ctx.fillStyle = '#6b7280'; // Gray for walls
+        ctx.fillRect(ex - 1, ey - 1, 3, 3);
       }
     });
     
