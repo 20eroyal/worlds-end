@@ -1,9 +1,9 @@
-import { app, BrowserWindow, dialog } from 'electron';
-import path from 'path';
-import { autoUpdater } from 'electron-updater';
+const { app, BrowserWindow, dialog } = require('electron');
+const path = require('path');
+const { autoUpdater } = require('electron-updater');
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
-if (await import('electron-squirrel-startup')) {
+if (require('electron-squirrel-startup')) {
   app.quit();
 }
 

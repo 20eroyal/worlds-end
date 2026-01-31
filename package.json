@@ -1,7 +1,7 @@
 {
   "name": "worlds-end",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "World's End - Isometric Tower Defense Game with P2P Multiplayer",
   "author": "Your Name",
   "main": "electron/main.js",
@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3001 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "electron:dist": "npm run build && electron-builder --win"
+    "electron:dist": "npm run build && electron-builder --win",
+    "release": "npm version patch && npm run electron:dist -- --publish always"
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
