@@ -4,44 +4,15 @@ import { cartToIso, isoToCart } from '../utils/isometric';
 import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME, BUILD_RADIUS, WALL_BOTTOM_OFFSET } from '../constants';
 import { EntityType, Entity, PlayerState } from '../types';
 
-// Helper to get correct asset path for Electron or web
-function getZombieSpritePath() {
-  // @ts-ignore
-  if (window && window.__dirname) {
-    // Electron: use absolute path
-    return window.__dirname + '/assets/zombie.png';
-  }
-  // Web: use relative path
-  return './assets/zombie.png';
-}
-
-function getHouseSpritePath() {
-  // @ts-ignore
-  if (window && window.__dirname) {
-    return window.__dirname + '/assets/house.png';
-  }
-  return './assets/house.png';
-}
-
-function getMineSpritePath() {
-  // @ts-ignore
-  if (window && window.__dirname) {
-    return window.__dirname + '/assets/mine.png';
-  }
-  return './assets/mine.png';
-}
-
-function getWallSpritePath() {
-  // @ts-ignore
-  if (window && window.__dirname) {
-    return window.__dirname + '/assets/wall.png';
-  }
-  return './assets/wall.png';
-}
+// Sprite URLs (bundled by Vite for web and Electron)
+const ZOMBIE_SPRITE_URL = new URL('../assets/zombie.png', import.meta.url).toString();
+const HOUSE_SPRITE_URL = new URL('../assets/house.png', import.meta.url).toString();
+const MINE_SPRITE_URL = new URL('../assets/mine.png', import.meta.url).toString();
+const WALL_SPRITE_URL = new URL('../assets/wall.png', import.meta.url).toString();
 
 // Zombie sprite configuration
 const ZOMBIE_SPRITE = {
-  src: getZombieSpritePath(),
+  src: ZOMBIE_SPRITE_URL,
   frameWidth: 64,   // Width of each frame
   frameHeight: 64,  // Height of each frame
   walkFrames: 4,    // Number of walk animation frames
@@ -93,7 +64,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
       setHouseLoaded(true);
       console.log('House sprite loaded');
     };
-    houseImg.src = getHouseSpritePath();
+    houseImg.src = HOUSE_SPRITE_URL;
     
     // Load mine sprite
     const mineImg = new Image();
@@ -105,7 +76,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     mineImg.onerror = (e) => {
       console.error('Failed to load mine sprite:', e);
     };
-    mineImg.src = getMineSpritePath();
+    mineImg.src = MINE_SPRITE_URL;
 
     // Load wall sprite
     const wallImg = new Image();
@@ -117,7 +88,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     wallImg.onerror = (e) => {
       console.error('Failed to load wall sprite:', e);
     };
-    wallImg.src = getWallSpritePath();
+    wallImg.src = WALL_SPRITE_URL;
     
     return () => {
       zombieSpriteRef.current = null;

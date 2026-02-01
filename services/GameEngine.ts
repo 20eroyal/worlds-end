@@ -24,6 +24,9 @@ const PLAYER_COLORS = [
 
 const PATH_RECALC_INTERVAL = 0.4; // seconds between path recalcs to reduce jitter
 const ATTACK_RANGE_BUFFER = 0.05; // small buffer so attackers don't stutter at range edge
+const WALL_TARGET_MAX_DISTANCE = 5; // tiles: don't divert to faraway walls
+const WALL_BLOCK_TOLERANCE = 0.75; // how close a wall must be to the direct line to count as blocking
+const WALL_BREAK_CLOSE_DISTANCE = 2.5; // within this distance, zombies will break walls even if a detour exists
 
 const getFacingFromVector = (dx: number, dy: number) => ((dx - dy) < 0 ? -1 : 1);
 
@@ -451,28 +454,37 @@ export class GameEngine {
     const distToTarget = getDistance(source, target);
 
     let bestWall: Entity | undefined;
-    let bestTime = Infinity;
+    let bestDist = Infinity;
 
     for (const wall of walls) {
       const distToWall = getDistance(source, wall);
+      if (distToWall > WALL_TARGET_MAX_DISTANCE) continue;
       if (distToWall >= distToTarget) continue;
 
       const wallRadius = wall.radius || 0.8;
       const lineDist = distancePointToSegment(wall.x, wall.y, ax, ay, bx, by);
-      if (lineDist > wallRadius + 0.35) continue;
+      if (lineDist > wallRadius + WALL_BLOCK_TOLERANCE) continue;
 
-      const speed = Math.max(0.1, source.speed || 1);
-      const damage = Math.max(1, source.damage || 1);
-      const approachTime = distToWall / speed;
-      const breakTime = wall.hp / damage;
-      const totalTime = approachTime + breakTime;
-
-      if (totalTime < bestTime) {
-        bestTime = totalTime;
+      if (distToWall < bestDist) {
+        bestDist = distToWall;
         bestWall = wall;
       }
     }
 
+    return bestWall;
+  }
+
+  findNearestWall(source: Entity, maxDistance: number): Entity | undefined {
+    let bestWall: Entity | undefined;
+    let bestDist = Infinity;
+    for (const wall of this.state.entities) {
+      if (wall.type !== EntityType.WALL || wall.hp <= 0) continue;
+      const dist = getDistance(source, wall);
+      if (dist <= maxDistance && dist < bestDist) {
+        bestDist = dist;
+        bestWall = wall;
+      }
+    }
     return bestWall;
   }
 
@@ -531,7 +543,7 @@ export class GameEngine {
         if (entity.type === EntityType.ZOMBIE) {
           // Target all player entities (bases, units, houses)
           const allPlayerIds = Object.keys(this.state.players);
-          const primaryTarget = this.findClosestTarget(entity, allPlayerIds);
+          const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL]);
           if (primaryTarget) {
             const lockedTarget = entity.targetId
               ? this.state.entities.find(e => e.id === entity.targetId && e.hp > 0)
@@ -554,14 +566,23 @@ export class GameEngine {
             let desiredTarget = target;
             let path = this.findPath(entity.x, entity.y, target.x, target.y, entity.id, ignoreTypes, blockedTiles);
             let pathTime = path ? getPathLength(path) / speed : Infinity;
+            const directTime = getDistance(entity, target) / speed;
 
             if (entity.type === EntityType.ZOMBIE && target.type !== EntityType.WALL) {
               const wallTarget = this.findBlockingWall(entity, target);
               if (wallTarget) {
-                const wallTime = (getDistance(entity, wallTarget) / speed) + (wallTarget.hp / Math.max(1, (entity.damage || 1)));
-                if (!path || wallTime < pathTime) {
+                const distToWall = getDistance(entity, wallTarget);
+                const shouldBreakWall = !path || pathTime > directTime * 1.25 || distToWall <= WALL_BREAK_CLOSE_DISTANCE;
+                if (shouldBreakWall) {
                   desiredTarget = wallTarget;
                   path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTiles);
+                }
+              }
+              if (!path) {
+                const nearbyWall = this.findNearestWall(entity, WALL_TARGET_MAX_DISTANCE);
+                if (nearbyWall) {
+                  desiredTarget = nearbyWall;
+                  path = this.findPath(entity.x, entity.y, nearbyWall.x, nearbyWall.y, entity.id, ignoreTypes, blockedTiles);
                 }
               }
             }
@@ -589,6 +610,22 @@ export class GameEngine {
           const targetRadius = target.radius || 0;
           const effectiveTargetRadius =
             target.type === EntityType.WALL ? Math.min(targetRadius, 0.6) : targetRadius;
+
+          // Drop wall targets that are now out of range
+          if (target.type === EntityType.WALL && dist > WALL_TARGET_MAX_DISTANCE) {
+            entity.targetId = undefined;
+            entity.path = undefined;
+            entity.pathIndex = undefined;
+            entity.pathCooldown = 0;
+            if (entity.type === EntityType.ZOMBIE) {
+              const allPlayerIds = Object.keys(this.state.players);
+              const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL]);
+              if (!primaryTarget) return;
+              target = primaryTarget;
+            } else {
+              return;
+            }
+          }
 
           // Attack as soon as in range, even if a path exists
           if (entity.range && dist <= entity.range + effectiveTargetRadius + ATTACK_RANGE_BUFFER) {
@@ -631,6 +668,13 @@ export class GameEngine {
                 entity.path = undefined;
                 entity.pathIndex = undefined;
                 entity.pathCooldown = PATH_RECALC_INTERVAL;
+                if (entity.type === EntityType.ZOMBIE) {
+                  const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
+                  if (nearbyWall) {
+                    entity.targetId = nearbyWall.id;
+                    entity.pathCooldown = 0;
+                  }
+                }
               }
 
               // If close to waypoint, advance
@@ -661,6 +705,13 @@ export class GameEngine {
                 entity.path = undefined;
                 entity.pathIndex = undefined;
                 entity.pathCooldown = PATH_RECALC_INTERVAL;
+                if (entity.type === EntityType.ZOMBIE) {
+                  const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
+                  if (nearbyWall) {
+                    entity.targetId = nearbyWall.id;
+                    entity.pathCooldown = 0;
+                  }
+                }
               }
             }
           }
@@ -707,12 +758,14 @@ export class GameEngine {
     }
   }
 
-  findClosestTarget(source: Entity, targetOwners: string[]): Entity | undefined {
+  findClosestTarget(source: Entity, targetOwners: string[], excludeTypes?: EntityType[]): Entity | undefined {
     let closest: Entity | undefined;
     let minDst = Infinity;
+    const excluded = excludeTypes ?? [];
 
     for (const e of this.state.entities) {
       if (targetOwners.includes(e.ownerId) && e.hp > 0) {
+        if (excluded.includes(e.type)) continue;
         const d = getDistance(source, e);
         if (d < minDst) {
           minDst = d;
