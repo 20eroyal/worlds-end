@@ -12,6 +12,9 @@ export const HOUSE_POP_INCREASE = 5;
 export const HOUSE_COST = 50;
 export const MINE_COST = 250;
 export const MINE_INCOME = 50; // Extra gold per income cycle
+export const WALL_COST = 30;
+// Visual tweak: pixels to nudge wall bottoms (positive = up). Keep at 0 for exact grid alignment.
+export const WALL_BOTTOM_OFFSET = 0;
 
 // Units
 export const UNIT_TYPES = {
@@ -28,7 +31,7 @@ export const UNIT_TYPES = {
   TANK: {
     name: 'Tank',
     cost: 60,
-    hp: 150,
+    hp: 300,
     damage: 25,
     speed: 1,
     range: 2,

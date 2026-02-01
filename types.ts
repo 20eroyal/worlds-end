@@ -9,7 +9,8 @@ export enum EntityType {
   BASE,
   HOUSE,
   ENEMY_BASE,
-  MINE
+  MINE,
+  WALL
 }
 
 export interface Entity {
@@ -25,10 +26,17 @@ export interface Entity {
   // Dynamic props
   targetId?: string | null;
   attackCooldown?: number;
+  lastAttackerId?: string; // Track who last dealt damage (for kill credit)
   
   // Velocity (for animation direction)
   vx?: number;
   vy?: number;
+  // Facing direction for sprites (-1 = left, 1 = right)
+  facing?: number;
+  // Pathfinding
+  path?: Vector2[];
+  pathIndex?: number;
+  pathCooldown?: number;
   
   // Unit specific
   damage?: number;

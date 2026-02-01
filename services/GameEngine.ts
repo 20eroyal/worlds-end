@@ -3,7 +3,7 @@ import {
 } from '../types';
 import { 
   MAP_SIZE, UNIT_TYPES, ZOMBIE_BOUNTY, BUILD_RADIUS, 
-  PASSIVE_GOLD_AMOUNT, COLORS, MINE_COST 
+  PASSIVE_GOLD_AMOUNT, COLORS, MINE_COST, WALL_COST 
 } from '../constants';
 import { getDistance } from '../utils/isometric';
 
@@ -21,6 +21,39 @@ const PLAYER_COLORS = [
   '#06b6d4', // Cyan
   '#f97316', // Orange
 ];
+
+const PATH_RECALC_INTERVAL = 0.4; // seconds between path recalcs to reduce jitter
+const ATTACK_RANGE_BUFFER = 0.05; // small buffer so attackers don't stutter at range edge
+
+const getFacingFromVector = (dx: number, dy: number) => ((dx - dy) < 0 ? -1 : 1);
+
+const getPathLength = (path: Vector2[]) => {
+  let length = 0;
+  for (let i = 1; i < path.length; i++) {
+    length += getDistance(path[i - 1], path[i]);
+  }
+  return length;
+};
+
+const distancePointToSegment = (
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+) => {
+  const dx = bx - ax;
+  const dy = by - ay;
+  if (dx === 0 && dy === 0) {
+    return Math.sqrt(Math.pow(px - ax, 2) + Math.pow(py - ay, 2));
+  }
+  const t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+  const clamped = Math.max(0, Math.min(1, t));
+  const cx = ax + clamped * dx;
+  const cy = ay + clamped * dy;
+  return Math.sqrt(Math.pow(px - cx, 2) + Math.pow(py - cy, 2));
+};
 
 // Base positions for up to 8 players (spread around the bottom-left area)
 const BASE_POSITIONS: Vector2[] = [
@@ -111,6 +144,11 @@ export class GameEngine {
     };
   }
 
+  // Snap a fractional cartesian coordinate to the nearest tile center (x.5)
+  snapToTileCoord(v: number) {
+    return Math.round(v - 0.5) + 0.5;
+  }
+
   // Check if a tile is valid terrain
   isValidTerrain(x: number, y: number): boolean {
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return false;
@@ -172,16 +210,19 @@ export class GameEngine {
     
     const houseCost = 50;
     
-    const dist = getDistance({x, y}, player.basePosition);
+    // Snap to nearest tile center
+    const sx = this.snapToTileCoord(x);
+    const sy = this.snapToTileCoord(y);
+    const dist = getDistance({x: sx, y: sy}, player.basePosition);
     const occupied = this.state.entities.some(e => 
-      Math.abs(e.x - x) < 0.8 && Math.abs(e.y - y) < 0.8
+      Math.abs(e.x - sx) < 0.8 && Math.abs(e.y - sy) < 0.8
     );
 
     if (
       player.gold >= houseCost && 
       dist <= BUILD_RADIUS && 
       !occupied &&
-      this.isValidTerrain(x, y)
+      this.isValidTerrain(sx, sy)
     ) {
       player.gold -= houseCost;
       player.maxPop += 5;
@@ -189,11 +230,11 @@ export class GameEngine {
       this.state.entities.push({
         id: generateId(),
         type: EntityType.HOUSE,
-        x: Math.floor(x) + 0.5,
-        y: Math.floor(y) + 0.5,
+        x: sx,
+        y: sy,
         hp: 100,
         maxHp: 100,
-        radius: 0.5,
+        radius: 1.0,
         ownerId: playerId
       });
     }
@@ -203,30 +244,236 @@ export class GameEngine {
     const player = this.state.players[playerId];
     if (!player || player.defeated) return; // Can't build if defeated
     
-    const dist = getDistance({x, y}, player.basePosition);
+    // Snap to nearest tile center
+    const sx = this.snapToTileCoord(x);
+    const sy = this.snapToTileCoord(y);
+    const dist = getDistance({x: sx, y: sy}, player.basePosition);
     const occupied = this.state.entities.some(e => 
-      Math.abs(e.x - x) < 0.8 && Math.abs(e.y - y) < 0.8
+      Math.abs(e.x - sx) < 0.8 && Math.abs(e.y - sy) < 0.8
     );
 
     if (
       player.gold >= MINE_COST && 
       dist <= BUILD_RADIUS && 
       !occupied &&
-      this.isValidTerrain(x, y)
+      this.isValidTerrain(sx, sy)
     ) {
       player.gold -= MINE_COST;
       
       this.state.entities.push({
         id: generateId(),
         type: EntityType.MINE,
-        x: Math.floor(x) + 0.5,
-        y: Math.floor(y) + 0.5,
+        x: sx,
+        y: sy,
         hp: 150,
         maxHp: 150,
-        radius: 0.5,
+        radius: 1.0,
         ownerId: playerId
       });
     }
+  }
+
+  buildWall(playerId: string, x: number, y: number) {
+    const player = this.state.players[playerId];
+    if (!player || player.defeated) return; // Can't build if defeated
+    
+    // Snap to nearest tile center
+    const sx = this.snapToTileCoord(x);
+    const sy = this.snapToTileCoord(y);
+    const occupied = this.state.entities.some(e => 
+      Math.abs(e.x - sx) < 0.8 && Math.abs(e.y - sy) < 0.8
+    );
+
+    // Walls can be placed anywhere on valid terrain (no BUILD_RADIUS restriction)
+    if (
+      player.gold >= WALL_COST && 
+      !occupied &&
+      this.isValidTerrain(sx, sy)
+    ) {
+      player.gold -= WALL_COST;
+      
+      this.state.entities.push({
+        id: generateId(),
+        type: EntityType.WALL,
+        x: sx,
+        y: sy,
+        hp: 200,
+        maxHp: 200,
+        // Keep wall hitbox close to tile size so zombies have to get near to attack
+        radius: 0.8,
+        ownerId: playerId
+      });
+    }
+  }
+
+
+  // Check whether a world position is blocked by an entity (used to prevent overlap)
+  isPositionBlocked(x: number, y: number, ignoreId?: string, ignoreTypes?: EntityType[]): boolean {
+    const ignoredTypes = ignoreTypes ?? [];
+    for (const e of this.state.entities) {
+      if (ignoreId && e.id === ignoreId) continue;
+      if (ignoredTypes.includes(e.type)) continue;
+      if (e.hp <= 0) continue;
+      // Consider walls, buildings and bases as blocking
+      if ([EntityType.WALL, EntityType.HOUSE, EntityType.MINE, EntityType.BASE, EntityType.ENEMY_BASE].includes(e.type)) {
+        const d = getDistance({ x, y }, e);
+        const blockerRadius = e.radius || 0.5;
+        // Use a small tolerance to avoid jitter
+        if (d < blockerRadius + 0.5) return true;
+      }
+    }
+    return false;
+  }
+
+  buildBlockedTiles(ignoreTypes?: EntityType[], ignoreId?: string): Set<string> {
+    const ignoredTypes = ignoreTypes ?? [];
+    const blocked = new Set<string>();
+
+    for (const e of this.state.entities) {
+      if (ignoreId && e.id === ignoreId) continue;
+      if (ignoredTypes.includes(e.type)) continue;
+      if (e.hp <= 0) continue;
+      if ([EntityType.WALL, EntityType.HOUSE, EntityType.MINE, EntityType.BASE, EntityType.ENEMY_BASE].includes(e.type)) {
+        const tx = Math.floor(e.x);
+        const ty = Math.floor(e.y);
+        if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
+          blocked.add(`${tx},${ty}`);
+        }
+      }
+    }
+
+    return blocked;
+  }
+
+  // A* pathfinding on integer tile grid. Returns array of tile centers {x,y} or null.
+  findPath(
+    startX: number,
+    startY: number,
+    goalX: number,
+    goalY: number,
+    ignoreId?: string,
+    ignoreTypes?: EntityType[],
+    blockedTiles?: Set<string>
+  ): Vector2[] | null {
+    const start = { x: Math.floor(startX), y: Math.floor(startY) };
+    const goal = { x: Math.floor(goalX), y: Math.floor(goalY) };
+
+    const key = (n: { x: number; y: number }) => `${n.x},${n.y}`;
+
+    const inBounds = (x: number, y: number) => x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE;
+
+    const heuristic = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+
+    const neighbors = [
+      { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 },
+      { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 }
+    ];
+
+    const openSet: { node: {x:number;y:number}, f: number }[] = [];
+    const cameFrom = new Map<string, string>();
+    const gScore = new Map<string, number>();
+
+    const startKey = key(start);
+    const goalKey = key(goal);
+
+    openSet.push({ node: start, f: heuristic(start, goal) });
+    gScore.set(startKey, 0);
+
+    const popLowest = () => {
+      let idx = 0;
+      let best = openSet[0];
+      for (let i = 1; i < openSet.length; i++) {
+        if (openSet[i].f < best.f) { best = openSet[i]; idx = i; }
+      }
+      return openSet.splice(idx, 1)[0];
+    };
+
+    while (openSet.length > 0) {
+      const current = popLowest().node;
+      const currentKey = key(current);
+      if (currentKey === goalKey) {
+        // reconstruct path
+        const path: {x:number;y:number}[] = [];
+        let curK: string | undefined = currentKey;
+        while (curK && curK !== startKey) {
+          const parts = curK.split(',').map(Number);
+          path.push({ x: parts[0] + 0.5, y: parts[1] + 0.5 });
+          curK = cameFrom.get(curK);
+        }
+        // add start
+        path.push({ x: start.x + 0.5, y: start.y + 0.5 });
+        return path.reverse();
+      }
+
+      for (const n of neighbors) {
+        const nx = current.x + n.x;
+        const ny = current.y + n.y;
+        if (!inBounds(nx, ny)) continue;
+        if (!this.isValidTerrain(nx, ny)) continue;
+
+        // Allow stepping into goal tile even if it's currently occupied by the target
+        const centerX = nx + 0.5;
+        const centerY = ny + 0.5;
+        const neighborKey = `${nx},${ny}`;
+        if (neighborKey !== goalKey) {
+          if (blockedTiles) {
+            if (blockedTiles.has(neighborKey)) continue;
+          } else if (this.isPositionBlocked(centerX, centerY, ignoreId, ignoreTypes)) {
+            continue;
+          }
+        }
+
+        const tentativeG = (gScore.get(currentKey) ?? Infinity) + ((n.x === 0 || n.y === 0) ? 1 : 1.4);
+        const prevG = gScore.get(neighborKey) ?? Infinity;
+        if (tentativeG < prevG) {
+          cameFrom.set(neighborKey, currentKey);
+          gScore.set(neighborKey, tentativeG);
+          const f = tentativeG + heuristic({ x: nx, y: ny }, goal);
+          // add to openSet if not present
+          if (!openSet.find(o => o.node.x === nx && o.node.y === ny)) {
+            openSet.push({ node: { x: nx, y: ny }, f });
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  findBlockingWall(source: Entity, target: Entity): Entity | undefined {
+    const walls = this.state.entities.filter(e => e.type === EntityType.WALL && e.hp > 0);
+    if (walls.length === 0) return undefined;
+
+    const ax = source.x;
+    const ay = source.y;
+    const bx = target.x;
+    const by = target.y;
+    const distToTarget = getDistance(source, target);
+
+    let bestWall: Entity | undefined;
+    let bestTime = Infinity;
+
+    for (const wall of walls) {
+      const distToWall = getDistance(source, wall);
+      if (distToWall >= distToTarget) continue;
+
+      const wallRadius = wall.radius || 0.8;
+      const lineDist = distancePointToSegment(wall.x, wall.y, ax, ay, bx, by);
+      if (lineDist > wallRadius + 0.35) continue;
+
+      const speed = Math.max(0.1, source.speed || 1);
+      const damage = Math.max(1, source.damage || 1);
+      const approachTime = distToWall / speed;
+      const breakTime = wall.hp / damage;
+      const totalTime = approachTime + breakTime;
+
+      if (totalTime < bestTime) {
+        bestTime = totalTime;
+        bestWall = wall;
+      }
+    }
+
+    return bestWall;
   }
 
   spawnZombie() {
@@ -270,6 +517,9 @@ export class GameEngine {
   update(deltaTime: number) {
     if (this.state.gameOver) return;
 
+    const blockedTilesDefault = this.buildBlockedTiles();
+    const blockedTilesIgnoreEnemyBase = this.buildBlockedTiles([EntityType.ENEMY_BASE]);
+
     this.state.entities.forEach(entity => {
       if (entity.attackCooldown && entity.attackCooldown > 0) {
         entity.attackCooldown -= deltaTime;
@@ -277,61 +527,155 @@ export class GameEngine {
 
       if (entity.type === EntityType.UNIT || entity.type === EntityType.ZOMBIE) {
         let target: Entity | undefined;
-        
+
         if (entity.type === EntityType.ZOMBIE) {
           // Target all player entities (bases, units, houses)
           const allPlayerIds = Object.keys(this.state.players);
-          target = this.findClosestTarget(entity, allPlayerIds);
+          const primaryTarget = this.findClosestTarget(entity, allPlayerIds);
+          if (primaryTarget) {
+            const lockedTarget = entity.targetId
+              ? this.state.entities.find(e => e.id === entity.targetId && e.hp > 0)
+              : undefined;
+            target = (lockedTarget && lockedTarget.type === EntityType.WALL) ? lockedTarget : primaryTarget;
+          }
         } else {
           target = this.findClosestTarget(entity, ['enemy']);
         }
 
         if (target) {
-           const dist = getDistance(entity, target);
-           
-           if (entity.range && dist > entity.range) {
-             const dx = target.x - entity.x;
-             const dy = target.y - entity.y;
-             const length = Math.sqrt(dx * dx + dy * dy);
-             
-             if (length > 0) {
-                const moveSpeed = (entity.speed || 1) * deltaTime;
-                const vx = (dx / length) * moveSpeed;
-                const vy = (dy / length) * moveSpeed;
-                let newX = entity.x + vx;
-                let newY = entity.y + vy;
+          const speed = Math.max(0.1, entity.speed || 1);
+          const ignoreTypes = entity.type === EntityType.ZOMBIE ? [EntityType.ENEMY_BASE] : undefined;
+          const blockedTiles = entity.type === EntityType.ZOMBIE ? blockedTilesIgnoreEnemyBase : blockedTilesDefault;
+          entity.pathCooldown = Math.max(0, (entity.pathCooldown ?? 0) - deltaTime);
 
-                if (this.isValidTerrain(newX, newY)) {
-                  entity.x = newX;
-                  entity.y = newY;
-                  // Store velocity for animation direction
-                  entity.vx = dx / length;
-                  entity.vy = dy / length;
+          // Pathfinding: compute path if needed (target changed or no path), throttled by cooldown
+          const needsNewPath = !entity.path || entity.targetId !== target.id || entity.pathIndex === undefined || entity.pathIndex >= (entity.path?.length || 0);
+          if (needsNewPath && entity.pathCooldown <= 0) {
+            let desiredTarget = target;
+            let path = this.findPath(entity.x, entity.y, target.x, target.y, entity.id, ignoreTypes, blockedTiles);
+            let pathTime = path ? getPathLength(path) / speed : Infinity;
+
+            if (entity.type === EntityType.ZOMBIE && target.type !== EntityType.WALL) {
+              const wallTarget = this.findBlockingWall(entity, target);
+              if (wallTarget) {
+                const wallTime = (getDistance(entity, wallTarget) / speed) + (wallTarget.hp / Math.max(1, (entity.damage || 1)));
+                if (!path || wallTime < pathTime) {
+                  desiredTarget = wallTarget;
+                  path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTiles);
                 }
-             }
-           } 
-           else if (entity.range && dist <= entity.range) {
-             // Not moving - clear velocity
-             entity.vx = 0;
-             entity.vy = 0;
-             if (!entity.attackCooldown || entity.attackCooldown <= 0) {
-               target.hp -= (entity.damage || 0);
-               entity.attackCooldown = 1.0; 
-             }
-           }
+              }
+            }
+
+            if (path && path.length > 0) {
+              entity.path = path;
+              entity.pathIndex = 0;
+            } else {
+              // No path found - clear path so we fallback to direct movement
+              entity.path = undefined;
+              entity.pathIndex = undefined;
+            }
+
+            entity.targetId = desiredTarget.id;
+            entity.pathCooldown = PATH_RECALC_INTERVAL;
+            target = desiredTarget;
+          } else if (entity.targetId && entity.targetId !== target.id) {
+            const lockedTarget = this.state.entities.find(e => e.id === entity.targetId && e.hp > 0);
+            if (lockedTarget) {
+              target = lockedTarget;
+            }
+          }
+
+          const dist = getDistance(entity, target);
+          const targetRadius = target.radius || 0;
+          const effectiveTargetRadius =
+            target.type === EntityType.WALL ? Math.min(targetRadius, 0.6) : targetRadius;
+
+          // Attack as soon as in range, even if a path exists
+          if (entity.range && dist <= entity.range + effectiveTargetRadius + ATTACK_RANGE_BUFFER) {
+            const dx = target.x - entity.x;
+            const dy = target.y - entity.y;
+            entity.vx = 0;
+            entity.vy = 0;
+            entity.facing = getFacingFromVector(dx, dy);
+            entity.path = undefined;
+            entity.pathIndex = undefined;
+
+            if (!entity.attackCooldown || entity.attackCooldown <= 0) {
+              target.hp -= (entity.damage || 0);
+              target.lastAttackerId = entity.ownerId;
+              entity.attackCooldown = 1.0;
+            }
+          } else if (entity.path && entity.pathIndex !== undefined && entity.pathIndex < entity.path.length) {
+            // Follow next waypoint
+            const waypoint = entity.path[entity.pathIndex];
+            const dx = waypoint.x - entity.x;
+            const dy = waypoint.y - entity.y;
+            const length = Math.sqrt(dx*dx + dy*dy);
+            if (length > 0) {
+              const moveStep = speed * deltaTime;
+              const step = Math.min(moveStep, length);
+              const stepX = (dx / length) * step;
+              const stepY = (dy / length) * step;
+              const newX = entity.x + stepX;
+              const newY = entity.y + stepY;
+              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes)) {
+                entity.x = newX;
+                entity.y = newY;
+                entity.vx = dx / length;
+                entity.vy = dy / length;
+                entity.facing = getFacingFromVector(dx, dy);
+              } else {
+                // blocked; drop path so it will be recomputed after cooldown
+                entity.vx = 0;
+                entity.vy = 0;
+                entity.path = undefined;
+                entity.pathIndex = undefined;
+                entity.pathCooldown = PATH_RECALC_INTERVAL;
+              }
+
+              // If close to waypoint, advance
+              if (Math.sqrt(Math.pow(waypoint.x - entity.x,2) + Math.pow(waypoint.y - entity.y,2)) < 0.2) {
+                entity.pathIndex = (entity.pathIndex ?? 0) + 1;
+              }
+            }
+          } else if (entity.range && dist > entity.range + effectiveTargetRadius) {
+            // No path: fallback to direct movement towards target, but respect blocking
+            const dx = target.x - entity.x;
+            const dy = target.y - entity.y;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            if (length > 0) {
+              const moveSpeed = speed * deltaTime;
+              const vx = (dx / length) * moveSpeed;
+              const vy = (dy / length) * moveSpeed;
+              const newX = entity.x + vx;
+              const newY = entity.y + vy;
+              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes)) {
+                entity.x = newX;
+                entity.y = newY;
+                entity.vx = dx / length;
+                entity.vy = dy / length;
+                entity.facing = getFacingFromVector(dx, dy);
+              } else {
+                entity.vx = 0;
+                entity.vy = 0;
+                entity.path = undefined;
+                entity.pathIndex = undefined;
+                entity.pathCooldown = PATH_RECALC_INTERVAL;
+              }
+            }
+          }
         }
       }
     });
 
     this.state.entities = this.state.entities.filter(e => {
         if (e.hp <= 0) {
-            // When a zombie dies, give bounty to all non-defeated players
-            if (e.type === EntityType.ZOMBIE) {
-                Object.values(this.state.players).forEach(player => {
-                    if (!player.defeated) {
-                        player.gold += ZOMBIE_BOUNTY;
-                    }
-                });
+            // When a zombie dies, give bounty to the player who killed it
+            if (e.type === EntityType.ZOMBIE && e.lastAttackerId) {
+                const killer = this.state.players[e.lastAttackerId];
+                if (killer && !killer.defeated) {
+                    killer.gold += ZOMBIE_BOUNTY;
+                }
             }
             // When a player's base is destroyed, mark them as defeated
             if (e.type === EntityType.BASE && e.ownerId) {

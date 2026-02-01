@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { GameEngine } from '../services/GameEngine';
 import { cartToIso, isoToCart } from '../utils/isometric';
-import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME, BUILD_RADIUS } from '../constants';
+import { TILE_SIZE, COLORS, MAP_SIZE, GOLD_GENERATION_INTERVAL, PASSIVE_GOLD_AMOUNT, MINE_INCOME, BUILD_RADIUS, WALL_BOTTOM_OFFSET } from '../constants';
 import { EntityType, Entity, PlayerState } from '../types';
 
 // Helper to get correct asset path for Electron or web
@@ -21,6 +21,22 @@ function getHouseSpritePath() {
     return window.__dirname + '/assets/house.png';
   }
   return './assets/house.png';
+}
+
+function getMineSpritePath() {
+  // @ts-ignore
+  if (window && window.__dirname) {
+    return window.__dirname + '/assets/mine.png';
+  }
+  return './assets/mine.png';
+}
+
+function getWallSpritePath() {
+  // @ts-ignore
+  if (window && window.__dirname) {
+    return window.__dirname + '/assets/wall.png';
+  }
+  return './assets/wall.png';
 }
 
 // Zombie sprite configuration
@@ -44,9 +60,14 @@ interface GameCanvasProps {
 const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, buildType, onSelectTile, isHost }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const zombieSpriteRef = useRef<HTMLImageElement | null>(null);
+  const zombieFrameMetaRef = useRef<{ anchorX: number; anchorY: number }[] | null>(null);
   const houseSpriteRef = useRef<HTMLImageElement | null>(null);
+  const mineSpriteRef = useRef<HTMLImageElement | null>(null);
+  const wallSpriteRef = useRef<HTMLImageElement | null>(null);
   const [spriteLoaded, setSpriteLoaded] = useState(false);
   const [houseLoaded, setHouseLoaded] = useState(false);
+  const [mineLoaded, setMineLoaded] = useState(false);
+  const [wallLoaded, setWallLoaded] = useState(false);
   
   // Load zombie sprite
   useEffect(() => {
@@ -74,11 +95,114 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     };
     houseImg.src = getHouseSpritePath();
     
+    // Load mine sprite
+    const mineImg = new Image();
+    mineImg.onload = () => {
+      mineSpriteRef.current = mineImg;
+      setMineLoaded(true);
+      console.log('Mine sprite loaded');
+    };
+    mineImg.onerror = (e) => {
+      console.error('Failed to load mine sprite:', e);
+    };
+    mineImg.src = getMineSpritePath();
+
+    // Load wall sprite
+    const wallImg = new Image();
+    wallImg.onload = () => {
+      wallSpriteRef.current = wallImg;
+      setWallLoaded(true);
+      console.log('Wall sprite loaded');
+    };
+    wallImg.onerror = (e) => {
+      console.error('Failed to load wall sprite:', e);
+    };
+    wallImg.src = getWallSpritePath();
+    
     return () => {
       zombieSpriteRef.current = null;
       houseSpriteRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!spriteLoaded || !zombieSpriteRef.current) return;
+
+    const sprite = zombieSpriteRef.current;
+    const frameCount = 4;
+    const frameW = Math.floor(sprite.naturalWidth / frameCount);
+    const frameH = sprite.naturalHeight;
+    const meta: { anchorX: number; anchorY: number }[] = [];
+
+    const canvas = document.createElement('canvas');
+    canvas.width = frameW;
+    canvas.height = frameH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const isVisible = (r: number, g: number, b: number, a: number) => {
+      if (a <= 8) return false;
+      return (r + g + b) > 16;
+    };
+
+    for (let i = 0; i < frameCount; i++) {
+      ctx.clearRect(0, 0, frameW, frameH);
+      ctx.drawImage(sprite, -i * frameW, 0);
+
+      const data = ctx.getImageData(0, 0, frameW, frameH).data;
+      let minX = frameW;
+      let maxX = 0;
+      let maxY = 0;
+      let found = false;
+
+      for (let y = 0; y < frameH; y++) {
+        for (let x = 0; x < frameW; x++) {
+          const idx = (y * frameW + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const a = data[idx + 3];
+          if (isVisible(r, g, b, a)) {
+            found = true;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+
+      if (!found) {
+        meta.push({ anchorX: frameW / 2, anchorY: frameH });
+        continue;
+      }
+
+      const footBandTop = Math.max(0, Math.floor(maxY - frameH * 0.25));
+      let sumX = 0;
+      let count = 0;
+
+      for (let y = footBandTop; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const idx = (y * frameW + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const a = data[idx + 3];
+          if (isVisible(r, g, b, a)) {
+            sumX += x;
+            count += 1;
+          }
+        }
+      }
+
+      const anchorX = count > 0 ? (sumX / count) : (minX + maxX) / 2;
+      meta.push({
+        anchorX,
+        anchorY: maxY
+      });
+    }
+
+    zombieFrameMetaRef.current = meta;
+  }, [spriteLoaded]);
   
   // Calculate initial offset - will be set once we know player's base
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -233,39 +357,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     return '#888888'; // Default gray for unknown
   };
 
-  // Create offscreen canvases for zombie frames (once)
-  const zombieFramesRef = useRef<HTMLCanvasElement[] | null>(null);
-  
-  useEffect(() => {
-    if (!spriteLoaded || !zombieSpriteRef.current) return;
-    
-    const sprite = zombieSpriteRef.current;
-    const frameW = Math.floor(sprite.naturalWidth / 4);
-    const frameH = Math.floor(sprite.naturalHeight / 4);
-    
-    console.log('Extracting frames: sprite', sprite.naturalWidth, 'x', sprite.naturalHeight, 'frame', frameW, 'x', frameH);
-    
-    // Create 4 canvases for the 4 walk frames (first row)
-    const frames: HTMLCanvasElement[] = [];
-    for (let i = 0; i < 4; i++) {
-      const canvas = document.createElement('canvas');
-      canvas.width = frameW;
-      canvas.height = frameH;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        // Draw the sprite offset so the frame we want is at 0,0
-        ctx.drawImage(sprite, -i * frameW, 0);
-        
-        // Debug: check if canvas has content
-        const imageData = ctx.getImageData(frameW/2, frameH/2, 1, 1);
-        console.log('Frame', i, 'center pixel:', imageData.data);
-      }
-      frames.push(canvas);
-    }
-    zombieFramesRef.current = frames;
-    console.log('Created', frames.length, 'zombie frames');
-  }, [spriteLoaded]);
-
   // Draw zombie using sprite sheet
   const drawZombie = (ctx: CanvasRenderingContext2D, pos: { x: number; y: number }, entity: Entity, time: number) => {
     const sprite = zombieSpriteRef.current;
@@ -277,77 +368,70 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
       ctx.fill();
       return;
     }
-    
+
     // Sprite is 4 columns x 1 row (2816 x 1536)
-    const fullFrameW = Math.floor(sprite.naturalWidth / 4);  // 704
-    const fullFrameH = sprite.naturalHeight;                  // 1536
-    
-    // Crop horizontally to just the zombie area (keep full height)
-    const cropTop = 0;  // Full height - start from top
-    const cropHeight = fullFrameH;  // Full height
-    const cropLeft = Math.floor(fullFrameW * 0.15);  // Trim 15% from left
-    const cropWidth = Math.floor(fullFrameW * 0.70);  // Take middle 70%
-    
-    // Animation frame - use only 3 frames, skip frame 0 (the standing pose with leg straight)
+    const frameCount = 4;
+    const frameW = Math.floor(sprite.naturalWidth / frameCount);
+    const frameH = sprite.naturalHeight;
+
     const idHash = entity.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-    const rawFrame = Math.floor((time * 0.0048 + idHash) % 3);  // 4x faster animation
-    // Map: skip frame 0. Use frames 3, 2, 1 (reversed for correct walk direction)
-    const frameMap = [3, 2, 1];
-    const frame = frameMap[rawFrame];
-    
-    // Per-frame offsets to align zombie center (counteract forward movement in sprite)
-    // Offsets for frames 1, 2, 3 (skipping 0)
-    const frameOffsetsX: Record<number, number> = { 1: 20, 2: 10, 3: 0 };
-    const frameOffsetsY: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
-    
-    // Scale so the zombie is about 50px visible height
+    const isMoving = Math.abs(entity.vx || 0) + Math.abs(entity.vy || 0) > 0.01;
+    const animSpeed = isMoving ? 0.0042 : 0; // time is in ms
+    const walkFrames = [0, 1, 2, 1]; // avoid the awkward last pose
+    const frame = isMoving
+      ? walkFrames[Math.floor((time * animSpeed + idHash) % walkFrames.length)]
+      : 0;
+
+    // Scale so the zombie stays consistent with the existing size
     const zombieVisibleHeight = 50;
-    const scale = zombieVisibleHeight / (fullFrameH * 0.35);
-    const destW = Math.round(cropWidth * scale);
-    const destH = Math.round(cropHeight * scale);
-    
-    // Sprite faces RIGHT by default, flip for left movement
-    const movingLeft = entity.vx !== undefined && entity.vx < 0;
-    
-    // Source position - cropped frame area
-    const sx = frame * fullFrameW + cropLeft;
-    const sy = cropTop;
-    
-    // Center on zombie position with per-frame offset compensation
+    const scale = zombieVisibleHeight / (frameH * 0.35);
+    const destW = Math.round(frameW * scale);
+    const destH = Math.round(frameH * scale);
+
+    const sx = frame * frameW;
+    const sy = 0;
+
     const centerX = Math.round(pos.x);
     const centerY = Math.round(pos.y);
-    const offsetX = frameOffsetsX[frame];
-    const offsetY = frameOffsetsY[frame];
-    
+    const groundOffset = Math.round(destH * 0.12);
+    const facing = entity.facing ?? (((entity.vx || 0) - (entity.vy || 0)) < 0 ? -1 : 1);
+    const meta = zombieFrameMetaRef.current;
+    const anchorX = meta?.[frame]?.anchorX ?? frameW / 2;
+    const anchorY = meta?.[frame]?.anchorY ?? frameH;
+    const anchorXScaled = anchorX * scale;
+    const anchorYScaled = anchorY * scale;
+
     ctx.save();
-    
-    if (movingLeft) {
+    if (facing < 0) {
       ctx.translate(centerX, centerY);
       ctx.scale(-1, 1);
       ctx.drawImage(
         sprite,
-        sx, sy, cropWidth, cropHeight,
-        -destW / 2 - offsetX, -destH + 15 + offsetY, destW, destH
+        sx, sy, frameW, frameH,
+        -anchorXScaled, -anchorYScaled + groundOffset, destW, destH
       );
     } else {
       ctx.drawImage(
         sprite,
-        sx, sy, cropWidth, cropHeight,
-        centerX - destW / 2 + offsetX, centerY - destH + 15 + offsetY, destW, destH
+        sx, sy, frameW, frameH,
+        centerX - anchorXScaled, centerY - anchorYScaled + groundOffset, destW, destH
       );
     }
-    
     ctx.restore();
   };
 
   const drawEntity = (ctx: CanvasRenderingContext2D, entity: Entity, time: number) => {
     const pos = cartToIso(entity.x, entity.y);
     
-    // Shadow (skip for zombies - they have no shadow)
-    if (entity.type !== EntityType.ZOMBIE) {
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    // Shadow (skip for zombies and buildings and walls - these render without shadows)
+    if (entity.type !== EntityType.ZOMBIE && entity.type !== EntityType.HOUSE && entity.type !== EntityType.MINE && entity.type !== EntityType.WALL) {
+      const r = Math.max(0.5, entity.radius || 0.5);
+      const shadowOffset = Math.round(TILE_SIZE * 0.18 * r);
+      const shadowRx = Math.round((TILE_SIZE * 0.5) * r);
+      const shadowRy = Math.round((TILE_SIZE * 0.25) * r);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.beginPath();
-      ctx.ellipse(pos.x, pos.y + 5, TILE_SIZE/2 * entity.radius, TILE_SIZE/4 * entity.radius, 0, 0, Math.PI * 2);
+      ctx.ellipse(pos.x, pos.y + shadowOffset, shadowRx, shadowRy, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -381,11 +465,13 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     } else if (entity.type === EntityType.HOUSE) {
       // Draw house sprite when available, otherwise fallback to tile-aligned rectangle
       const tileSize = TILE_SIZE;
-      const w = Math.round(tileSize * 1.5);
-      const h = Math.round(tileSize * 1.5);
+      // Increase to completely fill the grid square
+      const w = Math.round(tileSize * 2.0);
+      const h = Math.round(tileSize * 1.6);
       const x = Math.round(pos.x - w / 2);
-      // Anchor bottom slightly below pos.y so the building sits on the ground
-      const y = Math.round(pos.y - h + Math.round(tileSize * 0.2));
+      // Anchor so the sprite is slightly higher (move up to better fit tile)
+      // Slightly reduced multiplier to move the mine down a bit
+      const y = Math.round(pos.y - Math.round(h * 0.65));
 
       if (houseLoaded && houseSpriteRef.current) {
         const img = houseSpriteRef.current;
@@ -408,53 +494,75 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     } else if (entity.type === EntityType.MINE) {
       // Draw mine as a tile-aligned building with coin emblem
       const tileSize = TILE_SIZE;
-      const w = Math.round(tileSize * 1.5);
-      const h = Math.round(tileSize * 1.5);
+      // Increase to completely fill the grid square
+      const w = Math.round(tileSize * 2.0);
+      const h = Math.round(tileSize * 1.6);
       const x = Math.round(pos.x - w / 2);
-      const y = Math.round(pos.y - h + Math.round(tileSize * 0.2)); // anchor bottom slightly lower
+      // Anchor so the sprite is slightly higher (move up to better fit tile)
+      const y = Math.round(pos.y - Math.round(h * 0.70));
 
-      // Building body
-      ctx.fillStyle = '#fbbf24'; // gold/amber
-      ctx.fillRect(x, y, w, h);
-      // Border
-      ctx.strokeStyle = '#92400e';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, w, h);
-      // Coin emblem centered on building front
-      ctx.fillStyle = '#fef08a';
-      const coinR = Math.round(Math.min(w, h) * 0.18);
-      ctx.beginPath();
-      ctx.arc(pos.x, y + Math.round(h*0.35), coinR, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#92400e';
-      ctx.font = `bold ${Math.max(10, coinR)}px Arial`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('$', pos.x, y + Math.round(h*0.35));
+        if (mineLoaded && mineSpriteRef.current) {
+          // Draw mine sprite scaled to fit the tile-aligned box
+          const img = mineSpriteRef.current;
+          ctx.drawImage(img, x, y, w, h);
+        } else {
+          // Building body
+          ctx.fillStyle = '#fbbf24'; // gold/amber
+          ctx.fillRect(x, y, w, h);
+          // Border
+          ctx.strokeStyle = '#92400e';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x, y, w, h);
+          // Coin emblem centered on building front
+          ctx.fillStyle = '#fef08a';
+          const coinR = Math.round(Math.min(w, h) * 0.18);
+          ctx.beginPath();
+          ctx.arc(pos.x, y + Math.round(h*0.35), coinR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#92400e';
+          ctx.font = `bold ${Math.max(10, coinR)}px Arial`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('$', pos.x, y + Math.round(h*0.35));
+        }
     } else if (entity.type === EntityType.ZOMBIE) {
         // Draw animated zombie
         drawZombie(ctx, pos, entity, time);
     } else if (entity.type === EntityType.WALL) {
-        // Draw wall as a gray stone block
-        const size = TILE_SIZE * 0.5;
-        ctx.fillStyle = '#6b7280'; // Gray stone color
-        ctx.beginPath();
-        ctx.moveTo(pos.x, pos.y - size);
-        ctx.lineTo(pos.x + size, pos.y - size/2);
-        ctx.lineTo(pos.x, pos.y);
-        ctx.lineTo(pos.x - size, pos.y - size/2);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = '#374151'; // Dark gray border
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        // Add brick texture lines
-        ctx.strokeStyle = '#4b5563';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pos.x - size * 0.5, pos.y - size * 0.65);
-        ctx.lineTo(pos.x + size * 0.5, pos.y - size * 0.65);
-        ctx.stroke();
+        // Draw wall as sprite when available, otherwise fallback to gray stone block
+        const tileSize = TILE_SIZE;
+        // Make wall larger but not overwhelmingly so (half of previous 4x size)
+        const w = Math.round(tileSize * 3.0 * 2.0); // now 6.0x tileSize
+        const h = Math.round(tileSize * 2.4 * 2.0); // now 4.8x tileSize
+        const x = Math.round(pos.x - w / 2);
+        // Use same vertical anchor approach as houses/mines so the visual aligns with other buildings
+        const y = Math.round(pos.y - Math.round(h * 0.65)) - WALL_BOTTOM_OFFSET;
+
+        if (wallLoaded && wallSpriteRef.current) {
+          const img = wallSpriteRef.current;
+          ctx.drawImage(img, x, y, w, h);
+        } else {
+          // Draw wall as a larger gray stone block fallback
+          const size = TILE_SIZE * 0.9;
+          ctx.fillStyle = '#6b7280'; // Gray stone color
+          ctx.beginPath();
+          ctx.moveTo(pos.x, pos.y - size);
+          ctx.lineTo(pos.x + size, pos.y - size/2);
+          ctx.lineTo(pos.x, pos.y);
+          ctx.lineTo(pos.x - size, pos.y - size/2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = '#374151'; // Dark gray border
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          // Add brick texture line
+          ctx.strokeStyle = '#4b5563';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(pos.x - size * 0.5, pos.y - size * 0.65);
+          ctx.lineTo(pos.x + size * 0.5, pos.y - size * 0.65);
+          ctx.stroke();
+        }
     } else {
         // Player units
         ctx.fillStyle = getPlayerColor(entity.ownerId);
