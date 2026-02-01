@@ -1,7 +1,7 @@
 {
   "name": "worlds-end",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "World's End - Isometric Tower Defense Game with P2P Multiplayer",
   "author": "Your Name",
   "main": "electron/main.js",
