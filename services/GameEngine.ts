@@ -22,11 +22,12 @@ const PLAYER_COLORS = [
   '#f97316', // Orange
 ];
 
-const PATH_RECALC_INTERVAL = 0.4; // seconds between path recalcs to reduce jitter
+const PATH_RECALC_INTERVAL = 0.6; // seconds between path recalcs to reduce jitter
 const ATTACK_RANGE_BUFFER = 0.05; // small buffer so attackers don't stutter at range edge
 const WALL_TARGET_MAX_DISTANCE = 5; // tiles: don't divert to faraway walls
 const WALL_BLOCK_TOLERANCE = 0.75; // how close a wall must be to the direct line to count as blocking
 const WALL_BREAK_CLOSE_DISTANCE = 2.5; // within this distance, zombies will break walls even if a detour exists
+const UNIT_WALL_WAIT_BUFFER = 0.25; // units stop this close to a wall while waiting for a gap
 
 const getFacingFromVector = (dx: number, dy: number) => ((dx - dy) < 0 ? -1 : 1);
 
@@ -309,26 +310,51 @@ export class GameEngine {
     }
   }
 
+  removeWall(playerId: string, x: number, y: number) {
+    const player = this.state.players[playerId];
+    if (!player || player.defeated) return;
+
+    const sx = this.snapToTileCoord(x);
+    const sy = this.snapToTileCoord(y);
+    const idx = this.state.entities.findIndex(e =>
+      e.type === EntityType.WALL &&
+      e.ownerId === playerId &&
+      Math.abs(e.x - sx) < 0.6 &&
+      Math.abs(e.y - sy) < 0.6
+    );
+    if (idx >= 0) {
+      this.state.entities.splice(idx, 1);
+    }
+  }
+
 
   // Check whether a world position is blocked by an entity (used to prevent overlap)
-  isPositionBlocked(x: number, y: number, ignoreId?: string, ignoreTypes?: EntityType[]): boolean {
+  isPositionBlocked(
+    x: number,
+    y: number,
+    ignoreId?: string,
+    ignoreTypes?: EntityType[],
+    ignoreOwnerId?: string,
+    blockPadding: number = 0.5
+  ): boolean {
     const ignoredTypes = ignoreTypes ?? [];
     for (const e of this.state.entities) {
       if (ignoreId && e.id === ignoreId) continue;
       if (ignoredTypes.includes(e.type)) continue;
+      if (ignoreOwnerId && e.type === EntityType.BASE && e.ownerId === ignoreOwnerId) continue;
       if (e.hp <= 0) continue;
       // Consider walls, buildings and bases as blocking
       if ([EntityType.WALL, EntityType.HOUSE, EntityType.MINE, EntityType.BASE, EntityType.ENEMY_BASE].includes(e.type)) {
         const d = getDistance({ x, y }, e);
         const blockerRadius = e.radius || 0.5;
         // Use a small tolerance to avoid jitter
-        if (d < blockerRadius + 0.5) return true;
+        if (d < blockerRadius + blockPadding) return true;
       }
     }
     return false;
   }
 
-  buildBlockedTiles(ignoreTypes?: EntityType[], ignoreId?: string): Set<string> {
+  buildBlockedTiles(ignoreTypes?: EntityType[], ignoreId?: string, includeUnits: boolean = false): Set<string> {
     const ignoredTypes = ignoreTypes ?? [];
     const blocked = new Set<string>();
 
@@ -336,7 +362,10 @@ export class GameEngine {
       if (ignoreId && e.id === ignoreId) continue;
       if (ignoredTypes.includes(e.type)) continue;
       if (e.hp <= 0) continue;
-      if ([EntityType.WALL, EntityType.HOUSE, EntityType.MINE, EntityType.BASE, EntityType.ENEMY_BASE].includes(e.type)) {
+      if (
+        [EntityType.WALL, EntityType.HOUSE, EntityType.MINE, EntityType.BASE, EntityType.ENEMY_BASE].includes(e.type) ||
+        (includeUnits && [EntityType.UNIT, EntityType.ZOMBIE].includes(e.type))
+      ) {
         const tx = Math.floor(e.x);
         const ty = Math.floor(e.y);
         if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
@@ -358,8 +387,9 @@ export class GameEngine {
     ignoreTypes?: EntityType[],
     blockedTiles?: Set<string>
   ): Vector2[] | null {
-    const start = { x: Math.floor(startX), y: Math.floor(startY) };
-    const goal = { x: Math.floor(goalX), y: Math.floor(goalY) };
+    const snapToTile = (v: number) => Math.round(v - 0.5);
+    const start = { x: snapToTile(startX), y: snapToTile(startY) };
+    const goal = { x: snapToTile(goalX), y: snapToTile(goalY) };
 
     const key = (n: { x: number; y: number }) => `${n.x},${n.y}`;
 
@@ -378,6 +408,17 @@ export class GameEngine {
 
     const startKey = key(start);
     const goalKey = key(goal);
+
+    const isTileBlocked = (tx: number, ty: number) => {
+      if (!inBounds(tx, ty)) return true;
+      if (!this.isValidTerrain(tx, ty)) return true;
+      const tileKey = `${tx},${ty}`;
+      if (tileKey === goalKey) return false;
+      if (blockedTiles) return blockedTiles.has(tileKey);
+      const centerX = tx + 0.5;
+      const centerY = ty + 0.5;
+      return this.isPositionBlocked(centerX, centerY, ignoreId, ignoreTypes);
+    };
 
     openSet.push({ node: start, f: heuristic(start, goal) });
     gScore.set(startKey, 0);
@@ -412,18 +453,16 @@ export class GameEngine {
         const nx = current.x + n.x;
         const ny = current.y + n.y;
         if (!inBounds(nx, ny)) continue;
-        if (!this.isValidTerrain(nx, ny)) continue;
 
-        // Allow stepping into goal tile even if it's currently occupied by the target
-        const centerX = nx + 0.5;
-        const centerY = ny + 0.5;
         const neighborKey = `${nx},${ny}`;
-        if (neighborKey !== goalKey) {
-          if (blockedTiles) {
-            if (blockedTiles.has(neighborKey)) continue;
-          } else if (this.isPositionBlocked(centerX, centerY, ignoreId, ignoreTypes)) {
-            continue;
-          }
+        if (isTileBlocked(nx, ny)) continue;
+
+        if (n.x !== 0 && n.y !== 0) {
+          const adjX = current.x + n.x;
+          const adjY = current.y;
+          const adjX2 = current.x;
+          const adjY2 = current.y + n.y;
+          if (isTileBlocked(adjX, adjY) || isTileBlocked(adjX2, adjY2)) continue;
         }
 
         const tentativeG = (gScore.get(currentKey) ?? Infinity) + ((n.x === 0 || n.y === 0) ? 1 : 1.4);
@@ -529,8 +568,8 @@ export class GameEngine {
   update(deltaTime: number) {
     if (this.state.gameOver) return;
 
-    const blockedTilesDefault = this.buildBlockedTiles();
     const blockedTilesIgnoreEnemyBase = this.buildBlockedTiles([EntityType.ENEMY_BASE]);
+    const blockedTilesUnitsPassable = this.buildBlockedTiles([EntityType.HOUSE, EntityType.MINE, EntityType.BASE]);
 
     this.state.entities.forEach(entity => {
       if (entity.attackCooldown && entity.attackCooldown > 0) {
@@ -556,15 +595,23 @@ export class GameEngine {
 
         if (target) {
           const speed = Math.max(0.1, entity.speed || 1);
-          const ignoreTypes = entity.type === EntityType.ZOMBIE ? [EntityType.ENEMY_BASE] : undefined;
-          const blockedTiles = entity.type === EntityType.ZOMBIE ? blockedTilesIgnoreEnemyBase : blockedTilesDefault;
+          const ignoreTypes = entity.type === EntityType.ZOMBIE
+            ? [EntityType.ENEMY_BASE]
+            : [EntityType.HOUSE, EntityType.MINE, EntityType.BASE];
+          const ignoreOwnerId = entity.type === EntityType.UNIT ? entity.ownerId : undefined;
+          const blockPadding = entity.type === EntityType.UNIT ? 0.1 : 0.5;
+          const blockedTiles = entity.type === EntityType.ZOMBIE ? blockedTilesIgnoreEnemyBase : blockedTilesUnitsPassable;
+          const blockedTilesUnits = blockedTiles;
           entity.pathCooldown = Math.max(0, (entity.pathCooldown ?? 0) - deltaTime);
 
           // Pathfinding: compute path if needed (target changed or no path), throttled by cooldown
           const needsNewPath = !entity.path || entity.targetId !== target.id || entity.pathIndex === undefined || entity.pathIndex >= (entity.path?.length || 0);
           if (needsNewPath && entity.pathCooldown <= 0) {
             let desiredTarget = target;
-            let path = this.findPath(entity.x, entity.y, target.x, target.y, entity.id, ignoreTypes, blockedTiles);
+            let path = this.findPath(entity.x, entity.y, target.x, target.y, entity.id, ignoreTypes, blockedTilesUnits);
+            if (!path) {
+              path = this.findPath(entity.x, entity.y, target.x, target.y, entity.id, ignoreTypes, blockedTiles);
+            }
             let pathTime = path ? getPathLength(path) / speed : Infinity;
             const directTime = getDistance(entity, target) / speed;
 
@@ -572,24 +619,49 @@ export class GameEngine {
               const wallTarget = this.findBlockingWall(entity, target);
               if (wallTarget) {
                 const distToWall = getDistance(entity, wallTarget);
-                const shouldBreakWall = !path || pathTime > directTime * 1.25 || distToWall <= WALL_BREAK_CLOSE_DISTANCE;
+                const shouldBreakWall = !path || pathTime > directTime * 1.5 || distToWall <= WALL_BREAK_CLOSE_DISTANCE;
                 if (shouldBreakWall) {
                   desiredTarget = wallTarget;
-                  path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTiles);
+                  path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTilesUnits);
+                  if (!path) {
+                    path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTiles);
+                  }
                 }
               }
+            } else if (entity.type === EntityType.UNIT && target.type !== EntityType.WALL) {
               if (!path) {
-                const nearbyWall = this.findNearestWall(entity, WALL_TARGET_MAX_DISTANCE);
-                if (nearbyWall) {
-                  desiredTarget = nearbyWall;
-                  path = this.findPath(entity.x, entity.y, nearbyWall.x, nearbyWall.y, entity.id, ignoreTypes, blockedTiles);
+                const blockingWall = this.findBlockingWall(entity, target);
+                if (blockingWall) {
+                  desiredTarget = blockingWall;
+                  path = this.findPath(entity.x, entity.y, blockingWall.x, blockingWall.y, entity.id, ignoreTypes, blockedTilesUnits);
+                  if (!path) {
+                    path = this.findPath(entity.x, entity.y, blockingWall.x, blockingWall.y, entity.id, ignoreTypes, blockedTiles);
+                  }
                 }
               }
             }
 
             if (path && path.length > 0) {
-              entity.path = path;
-              entity.pathIndex = 0;
+              const lookahead = Math.min(4, path.length);
+              let startIndex = 0;
+              let bestDist = Infinity;
+              for (let i = 0; i < lookahead; i++) {
+                const d = getDistance(entity, path[i]);
+                if (d < bestDist) {
+                  bestDist = d;
+                  startIndex = i;
+                }
+              }
+              while (startIndex < path.length && getDistance(entity, path[startIndex]) < 0.2) {
+                startIndex += 1;
+              }
+              if (startIndex >= path.length) {
+                entity.path = undefined;
+                entity.pathIndex = undefined;
+              } else {
+                entity.path = path;
+                entity.pathIndex = startIndex;
+              }
             } else {
               // No path found - clear path so we fallback to direct movement
               entity.path = undefined;
@@ -628,7 +700,19 @@ export class GameEngine {
           }
 
           // Attack as soon as in range, even if a path exists
-          if (entity.range && dist <= entity.range + effectiveTargetRadius + ATTACK_RANGE_BUFFER) {
+          const waitingAtWall = entity.type === EntityType.UNIT &&
+            target.type === EntityType.WALL &&
+            dist <= (target.radius || 0) + UNIT_WALL_WAIT_BUFFER;
+
+          if (waitingAtWall) {
+            const dx = target.x - entity.x;
+            const dy = target.y - entity.y;
+            entity.vx = 0;
+            entity.vy = 0;
+            entity.facing = getFacingFromVector(dx, dy);
+            entity.path = undefined;
+            entity.pathIndex = undefined;
+          } else if (entity.range && dist <= entity.range + effectiveTargetRadius + ATTACK_RANGE_BUFFER) {
             const dx = target.x - entity.x;
             const dy = target.y - entity.y;
             entity.vx = 0;
@@ -648,31 +732,61 @@ export class GameEngine {
             const dx = waypoint.x - entity.x;
             const dy = waypoint.y - entity.y;
             const length = Math.sqrt(dx*dx + dy*dy);
-            if (length > 0) {
+            if (length < 0.05) {
+              entity.pathIndex = (entity.pathIndex ?? 0) + 1;
+            } else {
               const moveStep = speed * deltaTime;
               const step = Math.min(moveStep, length);
               const stepX = (dx / length) * step;
               const stepY = (dy / length) * step;
               const newX = entity.x + stepX;
               const newY = entity.y + stepY;
-              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes)) {
+              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes, ignoreOwnerId, blockPadding)) {
                 entity.x = newX;
                 entity.y = newY;
                 entity.vx = dx / length;
                 entity.vy = dy / length;
                 entity.facing = getFacingFromVector(dx, dy);
               } else {
-                // blocked; drop path so it will be recomputed after cooldown
-                entity.vx = 0;
-                entity.vy = 0;
-                entity.path = undefined;
-                entity.pathIndex = undefined;
-                entity.pathCooldown = PATH_RECALC_INTERVAL;
-                if (entity.type === EntityType.ZOMBIE) {
-                  const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
-                  if (nearbyWall) {
-                    entity.targetId = nearbyWall.id;
-                    entity.pathCooldown = 0;
+                if (entity.type === EntityType.UNIT) {
+                  // try sliding along the wall instead of bouncing
+                  const slideX = entity.x + stepX;
+                  const slideY = entity.y;
+                  const slideXOk = this.isValidTerrain(slideX, slideY) &&
+                    !this.isPositionBlocked(slideX, slideY, entity.id, ignoreTypes, ignoreOwnerId, blockPadding);
+                  const slideY2 = entity.y + stepY;
+                  const slideYOk = this.isValidTerrain(entity.x, slideY2) &&
+                    !this.isPositionBlocked(entity.x, slideY2, entity.id, ignoreTypes, ignoreOwnerId, blockPadding);
+                  if (slideXOk) {
+                    entity.x = slideX;
+                    entity.y = slideY;
+                    entity.vx = dx / length;
+                    entity.vy = 0;
+                  } else if (slideYOk) {
+                    entity.x = entity.x;
+                    entity.y = slideY2;
+                    entity.vx = 0;
+                    entity.vy = dy / length;
+                  } else {
+                    entity.vx = 0;
+                    entity.vy = 0;
+                    entity.path = undefined;
+                    entity.pathIndex = undefined;
+                    entity.pathCooldown = PATH_RECALC_INTERVAL;
+                  }
+                } else {
+                  // blocked; drop path so it will be recomputed after cooldown
+                  entity.vx = 0;
+                  entity.vy = 0;
+                  entity.path = undefined;
+                  entity.pathIndex = undefined;
+                  entity.pathCooldown = PATH_RECALC_INTERVAL;
+                  if (entity.type === EntityType.ZOMBIE) {
+                    const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
+                    if (nearbyWall) {
+                      entity.targetId = nearbyWall.id;
+                      entity.pathCooldown = 0;
+                    }
                   }
                 }
               }
@@ -683,6 +797,11 @@ export class GameEngine {
               }
             }
           } else if (entity.range && dist > entity.range + effectiveTargetRadius) {
+            if (entity.type === EntityType.UNIT) {
+              // Units should wait if no path (don't walk into walls/dark terrain)
+              entity.vx = 0;
+              entity.vy = 0;
+            } else {
             // No path: fallback to direct movement towards target, but respect blocking
             const dx = target.x - entity.x;
             const dy = target.y - entity.y;
@@ -693,7 +812,7 @@ export class GameEngine {
               const vy = (dy / length) * moveSpeed;
               const newX = entity.x + vx;
               const newY = entity.y + vy;
-              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes)) {
+              if (this.isValidTerrain(newX, newY) && !this.isPositionBlocked(newX, newY, entity.id, ignoreTypes, ignoreOwnerId, blockPadding)) {
                 entity.x = newX;
                 entity.y = newY;
                 entity.vx = dx / length;
@@ -713,6 +832,7 @@ export class GameEngine {
                   }
                 }
               }
+            }
             }
           }
         }

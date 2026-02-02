@@ -20,6 +20,8 @@ const AVAILABLE_COLORS = [
   { name: 'Orange', hex: '#f97316' },
 ];
 
+const appVersion = __APP_VERSION__;
+
 const App: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [buildMode, setBuildMode] = useState(false);
@@ -159,6 +161,9 @@ const App: React.FC = () => {
         } else if (action.action === 'buildWall' && engineRef.current) {
           console.log('Network: Host building wall for', action.playerId);
           engineRef.current.buildWall(action.playerId, action.x, action.y);
+        } else if (action.action === 'removeWall' && engineRef.current) {
+          console.log('Network: Host removing wall for', action.playerId);
+          engineRef.current.removeWall(action.playerId, action.x, action.y);
         } else if (action.action === 'startGame' && action.playerCount) {
           // Guest receives start game signal from host with player count and their player ID
           console.log('Network: Game starting with', action.playerCount, 'players! Assigned player ID:', action.playerId);
@@ -385,7 +390,7 @@ const App: React.FC = () => {
     setBuildMode(!buildMode);
   };
 
-  const handleTileSelect = (x: number, y: number) => {
+  const handleTileSelect = (x: number, y: number, remove?: boolean) => {
       if (buildMode) {
           if (buildType === 'house') {
             if (isMultiplayer && !isHost) {
@@ -412,16 +417,29 @@ const App: React.FC = () => {
               engine.buildMine(localPlayerId, x, y);
             }
           } else if (buildType === 'wall') {
-            if (isMultiplayer && !isHost) {
-              // Guest sends action to host
-              networkManager.sendAction({
-                action: 'buildWall',
-                playerId: localPlayerId,
-                x,
-                y
-              });
+            if (remove) {
+              if (isMultiplayer && !isHost) {
+                networkManager.sendAction({
+                  action: 'removeWall',
+                  playerId: localPlayerId,
+                  x,
+                  y
+                });
+              } else {
+                engine.removeWall(localPlayerId, x, y);
+              }
             } else {
-              engine.buildWall(localPlayerId, x, y);
+              if (isMultiplayer && !isHost) {
+                // Guest sends action to host
+                networkManager.sendAction({
+                  action: 'buildWall',
+                  playerId: localPlayerId,
+                  x,
+                  y
+                });
+              } else {
+                engine.buildWall(localPlayerId, x, y);
+              }
             }
           }
           // Don't auto-close build mode, let them build multiple
@@ -745,6 +763,10 @@ const App: React.FC = () => {
                 Enter your name, pick a color, then host or join a game!
             </p>
         </div>
+
+        <div className="absolute bottom-3 right-4 text-[10px] text-gray-500/80">
+          v{appVersion}
+        </div>
       </div>
     );
   }
@@ -883,7 +905,7 @@ const App: React.FC = () => {
       {/* Build Mode Instructions */}
       {buildMode && (
           <div className="absolute bottom-32 left-1/2 -translate-x-1/2 bg-black/70 px-4 py-2 rounded text-white text-sm pointer-events-none">
-              Click on the grid near your base to build a {buildType}. Press ESC to cancel.
+              Click on the grid near your base to build a {buildType}. Shift-click or right-click to remove walls. Press ESC to cancel.
           </div>
       )}
     </div>

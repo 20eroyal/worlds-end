@@ -9,6 +9,8 @@ const ZOMBIE_SPRITE_URL = new URL('../assets/zombie.png', import.meta.url).toStr
 const HOUSE_SPRITE_URL = new URL('../assets/house.png', import.meta.url).toString();
 const MINE_SPRITE_URL = new URL('../assets/mine.png', import.meta.url).toString();
 const WALL_SPRITE_URL = new URL('../assets/wall.png', import.meta.url).toString();
+const UNIT_SPRITE_URL = new URL('../assets/unit_farmer_base.png', import.meta.url).toString();
+const UNIT_MASK_URL = new URL('../assets/unit_farmer_mask.png', import.meta.url).toString();
 
 // Zombie sprite configuration
 const ZOMBIE_SPRITE = {
@@ -24,7 +26,7 @@ interface GameCanvasProps {
   playerId: string;
   buildMode: boolean;
   buildType?: 'house' | 'mine' | 'wall';
-  onSelectTile: (x: number, y: number) => void;
+  onSelectTile: (x: number, y: number, remove?: boolean) => void;
   isHost: boolean;
 }
 
@@ -35,10 +37,14 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
   const houseSpriteRef = useRef<HTMLImageElement | null>(null);
   const mineSpriteRef = useRef<HTMLImageElement | null>(null);
   const wallSpriteRef = useRef<HTMLImageElement | null>(null);
+  const unitSpriteRef = useRef<HTMLImageElement | null>(null);
+  const unitMaskRef = useRef<HTMLImageElement | null>(null);
+  const unitTintCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const [spriteLoaded, setSpriteLoaded] = useState(false);
   const [houseLoaded, setHouseLoaded] = useState(false);
   const [mineLoaded, setMineLoaded] = useState(false);
   const [wallLoaded, setWallLoaded] = useState(false);
+  const [unitLoaded, setUnitLoaded] = useState(false);
   
   // Load zombie sprite
   useEffect(() => {
@@ -89,6 +95,29 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
       console.error('Failed to load wall sprite:', e);
     };
     wallImg.src = WALL_SPRITE_URL;
+
+    // Load unit sprites
+    const unitImg = new Image();
+    unitImg.onload = () => {
+      unitSpriteRef.current = unitImg;
+      setUnitLoaded(true);
+      console.log('Unit sprite loaded');
+    };
+    unitImg.onerror = (e) => {
+      console.error('Failed to load unit sprite:', e);
+    };
+    unitImg.src = UNIT_SPRITE_URL;
+
+    const unitMask = new Image();
+    unitMask.onload = () => {
+      unitMaskRef.current = unitMask;
+      unitTintCacheRef.current.clear();
+      console.log('Unit mask loaded');
+    };
+    unitMask.onerror = (e) => {
+      console.error('Failed to load unit mask:', e);
+    };
+    unitMask.src = UNIT_MASK_URL;
     
     return () => {
       zombieSpriteRef.current = null;
@@ -257,6 +286,19 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     ctx.fillStyle = COLORS.BACKGROUND;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+    const keys = keysDownRef.current;
+    if (keys.size > 0) {
+      let dx = 0;
+      let dy = 0;
+      if (keys.has('w') || keys.has('arrowup')) dy += cameraSpeed;
+      if (keys.has('s') || keys.has('arrowdown')) dy -= cameraSpeed;
+      if (keys.has('a') || keys.has('arrowleft')) dx += cameraSpeed;
+      if (keys.has('d') || keys.has('arrowright')) dx -= cameraSpeed;
+      if (dx !== 0 || dy !== 0) {
+        setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      }
+    }
+
     ctx.save();
     const centerX = canvas.width / 2 + offset.x;
     const centerY = canvas.height / 2 + offset.y; // Changed from height/4 to height/2 for better centering
@@ -391,6 +433,96 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     ctx.restore();
   };
 
+  const getTintedUnitMask = (color: string) => {
+    const cached = unitTintCacheRef.current.get(color);
+    if (cached) return cached;
+    const mask = unitMaskRef.current;
+    if (!mask) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = mask.naturalWidth || mask.width;
+    canvas.height = mask.naturalHeight || mask.height;
+    const tctx = canvas.getContext('2d');
+    if (!tctx) return null;
+    tctx.clearRect(0, 0, canvas.width, canvas.height);
+    tctx.drawImage(mask, 0, 0);
+    tctx.globalCompositeOperation = 'source-in';
+    tctx.fillStyle = color;
+    tctx.fillRect(0, 0, canvas.width, canvas.height);
+    tctx.globalCompositeOperation = 'source-over';
+
+    unitTintCacheRef.current.set(color, canvas);
+    return canvas;
+  };
+
+  const drawUnit = (ctx: CanvasRenderingContext2D, pos: { x: number; y: number }, entity: Entity, time: number) => {
+    const sprite = unitSpriteRef.current;
+    if (!sprite || !unitLoaded) {
+      ctx.fillStyle = getPlayerColor(entity.ownerId);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y - 10, TILE_SIZE * entity.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      return;
+    }
+
+    const frameCols = 4;
+    const frameRows = 2;
+    const frameW = Math.floor(sprite.naturalWidth / frameCols);
+    const frameH = Math.floor(sprite.naturalHeight / frameRows);
+
+    const idHash = entity.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+    const isMoving = Math.abs(entity.vx || 0) + Math.abs(entity.vy || 0) > 0.01;
+    const isAttacking = (entity.attackCooldown ?? 0) > 0.6;
+    let frame = 0;
+    let row = 0;
+
+    if (isAttacking) {
+      row = 1;
+      frame = (entity.attackCooldown ?? 0) > 0.8 ? 1 : 0;
+    } else if (isMoving) {
+      const walkFrames = [0, 1, 2, 1];
+      const animSpeed = 0.006;
+      frame = walkFrames[Math.floor((time * animSpeed + idHash) % walkFrames.length)];
+      row = 0;
+    }
+
+    const unitVisibleHeight = 40;
+    const scale = unitVisibleHeight / (frameH * 0.8);
+    const destW = Math.round(frameW * scale);
+    const destH = Math.round(frameH * scale);
+    const sx = frame * frameW;
+    const sy = row * frameH;
+
+    const centerX = Math.round(pos.x);
+    const centerY = Math.round(pos.y);
+    const anchorX = frameW / 2;
+    const anchorY = frameH * 0.88;
+    const anchorXScaled = anchorX * scale;
+    const anchorYScaled = anchorY * scale;
+    const facing = entity.facing ?? (((entity.vx || 0) - (entity.vy || 0)) < 0 ? -1 : 1);
+
+    ctx.save();
+    if (facing < 0) {
+      ctx.translate(centerX, centerY);
+      ctx.scale(-1, 1);
+      ctx.drawImage(sprite, sx, sy, frameW, frameH, -anchorXScaled, -anchorYScaled, destW, destH);
+      const tintedMask = getTintedUnitMask(getPlayerColor(entity.ownerId));
+      if (tintedMask) {
+        ctx.drawImage(tintedMask, sx, sy, frameW, frameH, -anchorXScaled, -anchorYScaled, destW, destH);
+      }
+    } else {
+      ctx.drawImage(sprite, sx, sy, frameW, frameH, centerX - anchorXScaled, centerY - anchorYScaled, destW, destH);
+      const tintedMask = getTintedUnitMask(getPlayerColor(entity.ownerId));
+      if (tintedMask) {
+        ctx.drawImage(tintedMask, sx, sy, frameW, frameH, centerX - anchorXScaled, centerY - anchorYScaled, destW, destH);
+      }
+    }
+    ctx.restore();
+  };
+
   const drawEntity = (ctx: CanvasRenderingContext2D, entity: Entity, time: number) => {
     const pos = cartToIso(entity.x, entity.y);
     
@@ -499,6 +631,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     } else if (entity.type === EntityType.ZOMBIE) {
         // Draw animated zombie
         drawZombie(ctx, pos, entity, time);
+    } else if (entity.type === EntityType.UNIT) {
+        drawUnit(ctx, pos, entity, time);
     } else if (entity.type === EntityType.WALL) {
         // Draw wall as sprite when available, otherwise fallback to gray stone block
         const tileSize = TILE_SIZE;
@@ -698,6 +832,15 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     });
   };
 
+  const getCartFromEvent = (clientX: number, clientY: number) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const centerX = rect.width / 2 + offset.x;
+    const centerY = rect.height / 2 + offset.y;
+    const isoClickX = clientX - rect.left - centerX;
+    const isoClickY = clientY - rect.top - centerY;
+    return isoToCart(isoClickX, isoClickY);
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
     const rect = canvasRef.current!.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
@@ -719,14 +862,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     lastMousePos.current = { x: e.clientX, y: e.clientY };
 
     if (buildMode) {
-         const centerX = rect.width / 2 + offset.x;
-         const centerY = rect.height / 2 + offset.y;
-         
-         const isoClickX = e.clientX - rect.left - centerX;
-         const isoClickY = e.clientY - rect.top - centerY;
-         
-         const cart = isoToCart(isoClickX, isoClickY);
-         onSelectTile(cart.x, cart.y);
+         const cart = getCartFromEvent(e.clientX, e.clientY);
+         const remove = buildType === 'wall' && (e.shiftKey || e.button === 2);
+         onSelectTile(cart.x, cart.y, remove);
     }
   };
 
@@ -746,6 +884,49 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
     isMinimapDragging.current = false;
   };
 
+  const keysDownRef = useRef<Set<string>>(new Set());
+  const isTypingRef = useRef(false);
+  const cameraSpeed = 8;
+
+  useEffect(() => {
+    const updateTypingState = () => {
+      const active = document.activeElement;
+      const tag = active?.tagName?.toLowerCase();
+      isTypingRef.current = tag === 'input' || tag === 'textarea';
+    };
+    updateTypingState();
+    window.addEventListener('focusin', updateTypingState);
+    window.addEventListener('focusout', updateTypingState);
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isTypingRef.current) return;
+      const key = e.key.toLowerCase();
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowleft', 'arrowdown', 'arrowright'].includes(key)) {
+        keysDownRef.current.add(key);
+        e.preventDefault();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      keysDownRef.current.delete(key);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('focusin', updateTypingState);
+      window.removeEventListener('focusout', updateTypingState);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!buildMode || buildType !== 'wall') return;
+    const cart = getCartFromEvent(e.clientX, e.clientY);
+    onSelectTile(cart.x, cart.y, true);
+  };
+
   return (
     <canvas
       ref={canvasRef}
@@ -755,6 +936,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ engine, playerId, buildMode, bu
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
+      onContextMenu={handleContextMenu}
       className="cursor-move"
     />
   );
