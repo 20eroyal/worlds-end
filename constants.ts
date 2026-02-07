@@ -13,6 +13,12 @@ export const HOUSE_COST = 50;
 export const MINE_COST = 250;
 export const MINE_INCOME = 50; // Extra gold per income cycle
 export const WALL_COST = 30;
+export const FIRE_WALL_COST = 60;
+export const FIRE_WALL_DPS = 6;
+export const FIRE_WALL_BURN_DURATION = 3; // seconds
+export const FIRE_WALL_LIFETIME = 30; // seconds
+export const FOG_UNIT_RADIUS = 3; // tiles
+export const FOG_BUILDING_RADIUS = 2.5; // tiles
 // Visual tweak: pixels to nudge wall bottoms (positive = up). Keep at 0 for exact grid alignment.
 export const WALL_BOTTOM_OFFSET = 0;
 
@@ -26,7 +32,8 @@ export const UNIT_TYPES = {
     speed: 2,
     range: 1.5, // tiles
     color: '#3b82f6', // blue-500
-    radius: 0.3
+    radius: 0.3,
+    popCost: 1
   },
   TANK: {
     name: 'Tank',
@@ -34,9 +41,10 @@ export const UNIT_TYPES = {
     hp: 300,
     damage: 25,
     speed: 1,
-    range: 2,
+    range: 1.1,
     color: '#1d4ed8', // blue-700
-    radius: 0.5
+    radius: 0.5,
+    popCost: 2
   }
 };
 
@@ -54,4 +62,10 @@ export const COLORS = {
   HOUSE: '#f59e0b', // Amber
   GRID: 'rgba(255, 255, 255, 0.1)',
   SELECTION: 'rgba(255, 255, 255, 0.5)'
+};
+
+export const DIFFICULTY_SETTINGS = {
+  normal: { health: 1, damage: 1, speed: 1, spawn: 1 },
+  elite: { health: 1.25, damage: 1.2, speed: 1.15, spawn: 1.2 },
+  legendary: { health: 1.5, damage: 1.35, speed: 1.25, spawn: 1.4 }
 };

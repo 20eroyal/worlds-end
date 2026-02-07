@@ -3,6 +3,15 @@ export interface Vector2 {
   y: number;
 }
 
+export type GameMode = 'coop' | 'pvp';
+export type Difficulty = 'normal' | 'elite' | 'legendary';
+
+export interface GameOptions {
+  gameMode: GameMode;
+  difficulty: Difficulty;
+  fogOfWar: boolean;
+}
+
 export enum EntityType {
   UNIT,
   ZOMBIE,
@@ -10,7 +19,8 @@ export enum EntityType {
   HOUSE,
   ENEMY_BASE,
   MINE,
-  WALL
+  WALL,
+  FIRE_WALL
 }
 
 export interface Entity {
@@ -37,12 +47,22 @@ export interface Entity {
   path?: Vector2[];
   pathIndex?: number;
   pathCooldown?: number;
+  targetLock?: number;
+
+  // Status effects
+  burnTime?: number;
+  burnDps?: number;
+  burnOwnerId?: string;
+
+  // Timed entities
+  lifeTime?: number;
   
   // Unit specific
   damage?: number;
   range?: number;
   speed?: number;
   unitType?: string; // 'SOLDIER', 'TANK'
+  popCost?: number;
 }
 
 export interface PlayerState {
@@ -53,6 +73,7 @@ export interface PlayerState {
   maxPop: number;
   basePosition: Vector2;
   color: string;
+  team?: number;
   defeated: boolean;
 }
 
@@ -64,6 +85,8 @@ export interface GameState {
   winner: string | null;
   waveNumber: number;
   playerCount?: number;
+  paused?: boolean;
+  options: GameOptions;
 }
 
 export interface PeerMessage {
@@ -78,4 +101,5 @@ export interface LobbyPlayer {
   name: string;      // Display name
   color: string;     // Chosen color
   isHost: boolean;
+  team?: number;
 }

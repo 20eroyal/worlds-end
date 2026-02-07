@@ -1,9 +1,11 @@
 import { 
-  GameState, Entity, EntityType, PlayerState, Vector2, LobbyPlayer 
+  GameState, Entity, EntityType, PlayerState, Vector2, LobbyPlayer, GameOptions
 } from '../types';
 import { 
   MAP_SIZE, UNIT_TYPES, ZOMBIE_BOUNTY, BUILD_RADIUS, 
-  PASSIVE_GOLD_AMOUNT, COLORS, MINE_COST, WALL_COST 
+  PASSIVE_GOLD_AMOUNT, COLORS, MINE_COST, WALL_COST, FIRE_WALL_COST,
+  FIRE_WALL_DPS, FIRE_WALL_BURN_DURATION, FIRE_WALL_LIFETIME,
+  DIFFICULTY_SETTINGS
 } from '../constants';
 import { getDistance } from '../utils/isometric';
 
@@ -28,8 +30,13 @@ const WALL_TARGET_MAX_DISTANCE = 5; // tiles: don't divert to faraway walls
 const WALL_BLOCK_TOLERANCE = 0.75; // how close a wall must be to the direct line to count as blocking
 const WALL_BREAK_CLOSE_DISTANCE = 2.5; // within this distance, zombies will break walls even if a detour exists
 const UNIT_WALL_WAIT_BUFFER = 0.25; // units stop this close to a wall while waiting for a gap
+const TARGET_LOCK_DURATION = 1.2; // seconds to commit to a chosen target to avoid oscillation
 
 const getFacingFromVector = (dx: number, dy: number) => ((dx - dy) < 0 ? -1 : 1);
+const getTeamFallback = (playerId: string) => {
+  const parsed = Number(playerId.replace('p', ''));
+  return Number.isNaN(parsed) ? 1 : parsed;
+};
 
 const getPathLength = (path: Vector2[]) => {
   let length = 0;
@@ -76,18 +83,30 @@ export class GameEngine {
   playerCount: number;
   lobbyPlayers: LobbyPlayer[];
   
-  constructor(initialState?: GameState, playerCount: number = 1, lobbyPlayers?: LobbyPlayer[]) {
+  constructor(initialState?: GameState, playerCount: number = 1, lobbyPlayers?: LobbyPlayer[], options?: GameOptions) {
     this.playerCount = playerCount;
     this.lobbyPlayers = lobbyPlayers || [];
     if (initialState) {
       this.state = initialState;
+      if (!this.state.options) {
+        this.state.options = {
+          gameMode: 'coop',
+          difficulty: 'normal',
+          fogOfWar: false
+        };
+      }
     } else {
-      this.state = this.createInitialState(playerCount, lobbyPlayers);
+      this.state = this.createInitialState(playerCount, lobbyPlayers, options);
     }
   }
 
-  createInitialState(playerCount: number = 1, lobbyPlayers?: LobbyPlayer[]): GameState {
+  createInitialState(playerCount: number = 1, lobbyPlayers?: LobbyPlayer[], options?: GameOptions): GameState {
     const enemyBasePos = { x: 54, y: 10 }; 
+    const resolvedOptions: GameOptions = options ?? {
+      gameMode: 'coop',
+      difficulty: 'normal',
+      fogOfWar: false
+    };
     
     // Create players and their bases dynamically
     const players: Record<string, PlayerState> = {};
@@ -99,6 +118,9 @@ export class GameEngine {
       
       // Get lobby player info if available
       const lobbyPlayer = lobbyPlayers?.find(lp => lp.id === playerId);
+      const defaultTeam = resolvedOptions.gameMode === 'pvp'
+        ? (lobbyPlayer?.team ?? (i + 1))
+        : 1;
       
       players[playerId] = {
         id: playerId,
@@ -108,6 +130,7 @@ export class GameEngine {
         maxPop: 5,
         basePosition: basePos,
         color: lobbyPlayer?.color || PLAYER_COLORS[i],
+        team: lobbyPlayer?.team ?? defaultTeam,
         defeated: false
       };
       
@@ -144,13 +167,27 @@ export class GameEngine {
       gameOver: false,
       winner: null,
       waveNumber: 1,
-      playerCount: playerCount
+      playerCount: playerCount,
+      paused: false,
+      options: resolvedOptions
     };
   }
 
   // Snap a fractional cartesian coordinate to the nearest tile center (x.5)
   snapToTileCoord(v: number) {
     return Math.round(v - 0.5) + 0.5;
+  }
+
+  getTeamId(playerId: string) {
+    const player = this.state.players[playerId];
+    if (!player) return getTeamFallback(playerId);
+    return player.team ?? getTeamFallback(playerId);
+  }
+
+  areAllies(aId: string, bId: string) {
+    if (this.state.options.gameMode !== 'pvp') return true;
+    if (!this.state.players[aId] || !this.state.players[bId]) return false;
+    return this.getTeamId(aId) === this.getTeamId(bId);
   }
 
   // Check if a tile is valid terrain
@@ -177,14 +214,16 @@ export class GameEngine {
   }
 
   spawnUnit(playerId: string, unitTypeKey: keyof typeof UNIT_TYPES) {
+    if (this.state.paused) return;
     const player = this.state.players[playerId];
     if (!player || player.defeated) return; // Can't spawn if defeated
     
     const unitStats = UNIT_TYPES[unitTypeKey];
+    const popCost = unitStats.popCost ?? 1;
 
-    if (player.gold >= unitStats.cost && player.currentPop < player.maxPop) {
+    if (player.gold >= unitStats.cost && (player.currentPop + popCost) <= player.maxPop) {
       player.gold -= unitStats.cost;
-      player.currentPop++;
+      player.currentPop += popCost;
 
       const angle = Math.random() * Math.PI * 2;
       const spawnX = player.basePosition.x + Math.cos(angle) * 2;
@@ -203,12 +242,14 @@ export class GameEngine {
         range: unitStats.range,
         speed: unitStats.speed,
         unitType: unitTypeKey,
+        popCost,
         attackCooldown: 0
       });
     }
   }
 
   buildHouse(playerId: string, x: number, y: number) {
+    if (this.state.paused) return;
     const player = this.state.players[playerId];
     if (!player || player.defeated) return; // Can't build if defeated
     
@@ -245,6 +286,7 @@ export class GameEngine {
   }
 
   buildMine(playerId: string, x: number, y: number) {
+    if (this.state.paused) return;
     const player = this.state.players[playerId];
     if (!player || player.defeated) return; // Can't build if defeated
     
@@ -278,6 +320,7 @@ export class GameEngine {
   }
 
   buildWall(playerId: string, x: number, y: number) {
+    if (this.state.paused) return;
     const player = this.state.players[playerId];
     if (!player || player.defeated) return; // Can't build if defeated
     
@@ -310,7 +353,40 @@ export class GameEngine {
     }
   }
 
+  buildFireWall(playerId: string, x: number, y: number) {
+    if (this.state.paused) return;
+    const player = this.state.players[playerId];
+    if (!player || player.defeated) return;
+
+    const sx = this.snapToTileCoord(x);
+    const sy = this.snapToTileCoord(y);
+    const occupied = this.state.entities.some(e =>
+      Math.abs(e.x - sx) < 0.8 && Math.abs(e.y - sy) < 0.8
+    );
+
+    if (
+      player.gold >= FIRE_WALL_COST &&
+      !occupied &&
+      this.isValidTerrain(sx, sy)
+    ) {
+      player.gold -= FIRE_WALL_COST;
+
+      this.state.entities.push({
+        id: generateId(),
+        type: EntityType.FIRE_WALL,
+        x: sx,
+        y: sy,
+        hp: 150,
+        maxHp: 150,
+        radius: 0.8,
+        ownerId: playerId,
+        lifeTime: FIRE_WALL_LIFETIME
+      });
+    }
+  }
+
   removeWall(playerId: string, x: number, y: number) {
+    if (this.state.paused) return;
     const player = this.state.players[playerId];
     if (!player || player.defeated) return;
 
@@ -528,13 +604,15 @@ export class GameEngine {
   }
 
   spawnZombie() {
+    if (this.state.paused) return;
     const enemyBase = this.state.entities.find(e => e.type === EntityType.ENEMY_BASE);
     if (!enemyBase) return;
 
+    const difficulty = DIFFICULTY_SETTINGS[this.state.options.difficulty] ?? DIFFICULTY_SETTINGS.normal;
     // Scale zombie stats based on player count
     const playerMultiplier = 1 + ((this.playerCount - 1) * 0.3); // 30% stronger per extra player
-    const hp = Math.floor((30 + (this.state.waveNumber * 5)) * playerMultiplier);
-    const damage = Math.floor((5 + (this.state.waveNumber * 1)) * playerMultiplier);
+    const hp = Math.floor((30 + (this.state.waveNumber * 5)) * playerMultiplier * difficulty.health);
+    const damage = Math.floor((5 + (this.state.waveNumber * 1)) * playerMultiplier * difficulty.damage);
 
     const angle = Math.random() * Math.PI * 2;
     const spawnX = enemyBase.x + Math.cos(angle) * 2;
@@ -551,46 +629,68 @@ export class GameEngine {
       ownerId: 'enemy',
       damage: damage,
       range: 0.8,
-      speed: 0.8,  // 33% slower movement
+      speed: 0.8 * difficulty.speed,  // 33% slower movement
       attackCooldown: 0
     });
   }
   
   // Spawn multiple zombies based on player count
   spawnZombieWave() {
+    if (this.state.paused) return;
+    const difficulty = DIFFICULTY_SETTINGS[this.state.options.difficulty] ?? DIFFICULTY_SETTINGS.normal;
     // Spawn more zombies for more players
-    const zombiesToSpawn = Math.ceil(this.playerCount * 1.5);
+    const zombiesToSpawn = Math.ceil(this.playerCount * 1.5 * difficulty.spawn);
     for (let i = 0; i < zombiesToSpawn; i++) {
       this.spawnZombie();
     }
   }
 
   update(deltaTime: number) {
-    if (this.state.gameOver) return;
+    if (this.state.gameOver || this.state.paused) return;
 
     const blockedTilesIgnoreEnemyBase = this.buildBlockedTiles([EntityType.ENEMY_BASE]);
     const blockedTilesUnitsPassable = this.buildBlockedTiles([EntityType.HOUSE, EntityType.MINE, EntityType.BASE]);
+    const fireWalls = this.state.entities.filter(e => e.type === EntityType.FIRE_WALL && e.hp > 0);
 
     this.state.entities.forEach(entity => {
+      if (entity.type === EntityType.FIRE_WALL && entity.lifeTime !== undefined) {
+        entity.lifeTime = Math.max(0, entity.lifeTime - deltaTime);
+        if (entity.lifeTime <= 0) {
+          entity.hp = 0;
+        }
+      }
+
       if (entity.attackCooldown && entity.attackCooldown > 0) {
         entity.attackCooldown -= deltaTime;
       }
 
       if (entity.type === EntityType.UNIT || entity.type === EntityType.ZOMBIE) {
+        if (entity.targetLock && entity.targetLock > 0) {
+          entity.targetLock = Math.max(0, entity.targetLock - deltaTime);
+        }
         let target: Entity | undefined;
 
         if (entity.type === EntityType.ZOMBIE) {
           // Target all player entities (bases, units, houses)
           const allPlayerIds = Object.keys(this.state.players);
-          const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL]);
+          const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL, EntityType.FIRE_WALL]);
+          const lockedTarget = entity.targetId
+            ? this.state.entities.find(e => e.id === entity.targetId && e.hp > 0)
+            : undefined;
           if (primaryTarget) {
-            const lockedTarget = entity.targetId
-              ? this.state.entities.find(e => e.id === entity.targetId && e.hp > 0)
-              : undefined;
-            target = (lockedTarget && lockedTarget.type === EntityType.WALL) ? lockedTarget : primaryTarget;
+            if ((entity.targetLock ?? 0) > 0 && lockedTarget) {
+              target = lockedTarget;
+            } else {
+              target = (lockedTarget && lockedTarget.type === EntityType.WALL) ? lockedTarget : primaryTarget;
+            }
           }
         } else {
-          target = this.findClosestTarget(entity, ['enemy']);
+          if (this.state.options.gameMode === 'pvp') {
+            const enemyOwners = Object.keys(this.state.players).filter(id => !this.areAllies(entity.ownerId, id));
+            target = this.findClosestTarget(entity, ['enemy', ...enemyOwners]);
+          } else {
+            target = this.findClosestTarget(entity, ['enemy']);
+          }
         }
 
         if (target) {
@@ -622,6 +722,7 @@ export class GameEngine {
                 const shouldBreakWall = !path || pathTime > directTime * 1.5 || distToWall <= WALL_BREAK_CLOSE_DISTANCE;
                 if (shouldBreakWall) {
                   desiredTarget = wallTarget;
+                  entity.targetLock = TARGET_LOCK_DURATION;
                   path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTilesUnits);
                   if (!path) {
                     path = this.findPath(entity.x, entity.y, wallTarget.x, wallTarget.y, entity.id, ignoreTypes, blockedTiles);
@@ -689,9 +790,10 @@ export class GameEngine {
             entity.path = undefined;
             entity.pathIndex = undefined;
             entity.pathCooldown = 0;
+            entity.targetLock = 0;
             if (entity.type === EntityType.ZOMBIE) {
               const allPlayerIds = Object.keys(this.state.players);
-              const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL]);
+              const primaryTarget = this.findClosestTarget(entity, allPlayerIds, [EntityType.WALL, EntityType.FIRE_WALL]);
               if (!primaryTarget) return;
               target = primaryTarget;
             } else {
@@ -785,6 +887,7 @@ export class GameEngine {
                     const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
                     if (nearbyWall) {
                       entity.targetId = nearbyWall.id;
+                      entity.targetLock = TARGET_LOCK_DURATION;
                       entity.pathCooldown = 0;
                     }
                   }
@@ -828,12 +931,32 @@ export class GameEngine {
                   const nearbyWall = this.findNearestWall(entity, WALL_BREAK_CLOSE_DISTANCE);
                   if (nearbyWall) {
                     entity.targetId = nearbyWall.id;
+                    entity.targetLock = TARGET_LOCK_DURATION;
                     entity.pathCooldown = 0;
                   }
                 }
               }
             }
             }
+          }
+
+          if (entity.type === EntityType.ZOMBIE && fireWalls.length > 0) {
+            for (const fire of fireWalls) {
+              if (getDistance(entity, fire) <= (fire.radius || 0.8)) {
+                entity.burnTime = FIRE_WALL_BURN_DURATION;
+                entity.burnDps = FIRE_WALL_DPS;
+                entity.burnOwnerId = fire.ownerId;
+                break;
+              }
+            }
+          }
+        }
+
+        if (entity.type === EntityType.ZOMBIE && entity.burnTime && entity.burnTime > 0 && entity.burnDps) {
+          entity.burnTime = Math.max(0, entity.burnTime - deltaTime);
+          entity.hp -= entity.burnDps * deltaTime;
+          if (entity.burnOwnerId) {
+            entity.lastAttackerId = entity.burnOwnerId;
           }
         }
       }
@@ -856,7 +979,8 @@ export class GameEngine {
             }
             if (e.type === EntityType.UNIT) {
                 if (this.state.players[e.ownerId]) {
-                    this.state.players[e.ownerId].currentPop = Math.max(0, this.state.players[e.ownerId].currentPop - 1);
+                    const popCost = e.popCost ?? 1;
+                    this.state.players[e.ownerId].currentPop = Math.max(0, this.state.players[e.ownerId].currentPop - popCost);
                 }
             }
             return false;
@@ -868,13 +992,21 @@ export class GameEngine {
     // Players lose if ALL their bases are destroyed
     const remainingPlayerBases = this.state.entities.filter(e => e.type === EntityType.BASE);
     const enemyBase = this.state.entities.find(e => e.id === 'enemy_base');
+    const isPvp = this.state.options.gameMode === 'pvp';
 
     if (remainingPlayerBases.length === 0) {
+      this.state.gameOver = true;
+      this.state.winner = 'ZOMBIES';
+    } else if (isPvp) {
+      const aliveTeams = new Set(remainingPlayerBases.map(base => this.getTeamId(base.ownerId)));
+      if (aliveTeams.size <= 1) {
+        const [team] = Array.from(aliveTeams);
         this.state.gameOver = true;
-        this.state.winner = 'ZOMBIES';
+        this.state.winner = team ? `TEAM ${team}` : 'PLAYERS';
+      }
     } else if (!enemyBase) {
-        this.state.gameOver = true;
-        this.state.winner = 'PLAYERS';
+      this.state.gameOver = true;
+      this.state.winner = 'PLAYERS';
     }
   }
 
